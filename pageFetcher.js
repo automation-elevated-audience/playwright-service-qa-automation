@@ -22,9 +22,10 @@ async function fetchPage(pageUrl) {
 
     const page = await context.newPage();
 
+    const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 60000;
     const response = await page.goto(pageUrl, {
       waitUntil: 'networkidle',
-      timeout: 30000
+      timeout: navTimeout
     });
 
     if (!response) {

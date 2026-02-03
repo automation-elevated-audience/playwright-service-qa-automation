@@ -23,10 +23,11 @@ async function checkPageLinks(pageUrl) {
     
     const page = await context.newPage();
     
-    // Navigate to page with timeout
+    // Navigate to page with timeout (configurable via REQUEST_TIMEOUT env)
+    const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 60000;
     await page.goto(pageUrl, { 
       waitUntil: 'networkidle',
-      timeout: 30000 
+      timeout: navTimeout 
     });
     
     // Wait a bit for dynamic content

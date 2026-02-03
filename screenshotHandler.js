@@ -34,9 +34,10 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
 
     const page = await context.newPage();
 
+    const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 60000;
     await page.goto(url, {
       waitUntil: 'networkidle',
-      timeout: 30000
+      timeout: navTimeout
     });
 
     await page.waitForTimeout(2000);
