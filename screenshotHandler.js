@@ -6,8 +6,12 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 667 }
 };
 
+// Maximum screenshot height (Claude API limit)
+const MAX_SCREENSHOT_HEIGHT = 7500;
+
 /**
  * Capture a full-page screenshot with the specified viewport
+ * Height is capped at 7500px to comply with Claude API limits
  * @param {string} url - The URL to capture
  * @param {string} viewport - 'desktop' | 'tablet' | 'mobile'
  * @param {boolean} fullPage - Whether to capture full page (default: true)
@@ -42,11 +46,36 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
 
     await page.waitForTimeout(2000);
 
-    const buffer = await page.screenshot({
-      type: 'jpeg',
-      fullPage: fullPage !== false,
-      quality: Math.min(100, Math.max(0, quality))
-    });
+    // Get the full page height
+    const pageHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+    const pageWidth = dimensions.width;
+
+    console.log(`[PLAYWRIGHT] Page dimensions: ${pageWidth}x${pageHeight}`);
+
+    let buffer;
+
+    if (fullPage !== false && pageHeight > MAX_SCREENSHOT_HEIGHT) {
+      // Page exceeds max height - capture with clip to cap at 7500px
+      console.log(`[PLAYWRIGHT] Page height ${pageHeight}px exceeds limit, capping at ${MAX_SCREENSHOT_HEIGHT}px`);
+      
+      buffer = await page.screenshot({
+        type: 'jpeg',
+        quality: Math.min(100, Math.max(0, quality)),
+        clip: {
+          x: 0,
+          y: 0,
+          width: pageWidth,
+          height: MAX_SCREENSHOT_HEIGHT
+        }
+      });
+    } else {
+      // Page is within limits - capture normally
+      buffer = await page.screenshot({
+        type: 'jpeg',
+        fullPage: fullPage !== false,
+        quality: Math.min(100, Math.max(0, quality))
+      });
+    }
 
     await browser.close();
 
