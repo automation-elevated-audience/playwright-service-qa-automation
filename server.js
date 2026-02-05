@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const { checkMultiplePages } = require('./linkChecker');
 const { fetchPage } = require('./pageFetcher');
 const { captureScreenshot } = require('./screenshotHandler');
+const { checkPageContent } = require('./contentChecker');
 
 // Load environment variables
 dotenv.config();
@@ -143,6 +144,36 @@ app.post('/screenshot', async (req, res) => {
   }
 });
 
+// Check page content against expected content
+app.post('/check-content', async (req, res) => {
+  try {
+    const { url, expectedContent } = req.body;
+
+    if (!url || typeof url !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid request',
+        message: 'Please provide a "url" in the request body'
+      });
+    }
+
+    console.log(`[SERVER] Checking content for: ${url}`);
+    const result = await checkPageContent(url, expectedContent || '');
+    
+    res.json({
+      success: true,
+      url,
+      contentCheck: result
+    });
+  } catch (error) {
+    console.error('[SERVER] Error checking content:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('[SERVER] Unhandled error:', err);
@@ -176,6 +207,7 @@ const server = app.listen(PORT, () => {
 ║   • POST /check-links                                    ║
 ║   • POST /fetch-page                                     ║
 ║   • POST /screenshot                                     ║
+║   • POST /check-content                                  ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 });

@@ -102,6 +102,45 @@ Response:
 }
 ```
 
+### Check Content
+```
+POST /check-content
+```
+
+Compares page content against expected content from a copy document.
+
+Request Body:
+```json
+{
+  "url": "https://example.com/about",
+  "expectedContent": "Welcome to our company. We provide excellent services..."
+}
+```
+
+Response:
+```json
+{
+  "success": true,
+  "url": "https://example.com/about",
+  "contentCheck": {
+    "status": "PASS",
+    "issue": null,
+    "matchPercentage": 85,
+    "missingPhrases": [],
+    "wordCountExpected": 250,
+    "wordCountActual": 280,
+    "contentChecked": true
+  }
+}
+```
+
+Content Check Status Values:
+- `PASS` - Content matches well (75%+ similarity)
+- `WARNING` - Some differences detected (50-75% similarity)
+- `FAIL` - Significant differences (<50% similarity or 5+ missing phrases)
+- `SKIPPED` - No expected content provided
+- `ERROR` - Failed to fetch or analyze page
+
 ## Environment Variables
 
 Create a `.env` file:
