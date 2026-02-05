@@ -24,9 +24,11 @@ async function checkPageLinks(pageUrl) {
     const page = await context.newPage();
     
     // Navigate to page with timeout (configurable via REQUEST_TIMEOUT env)
+    // Use 'domcontentloaded' instead of 'networkidle' - faster and more reliable
+    // networkidle can timeout on sites with analytics/ads that never stop making requests
     const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 60000;
     await page.goto(pageUrl, { 
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: navTimeout 
     });
     

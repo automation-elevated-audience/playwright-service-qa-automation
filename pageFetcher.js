@@ -22,9 +22,11 @@ async function fetchPage(pageUrl) {
 
     const page = await context.newPage();
 
+    // Use 'load' instead of 'networkidle' - more reliable for page fetching
+    // networkidle can timeout on sites with analytics/ads that never stop making requests
     const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 60000;
     const response = await page.goto(pageUrl, {
-      waitUntil: 'networkidle',
+      waitUntil: 'load',
       timeout: navTimeout
     });
 
