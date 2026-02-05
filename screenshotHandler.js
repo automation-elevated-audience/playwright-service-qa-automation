@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const sharp = require('sharp');
 
 const VIEWPORTS = {
   desktop: { width: 1920, height: 1080 },
@@ -6,17 +7,73 @@ const VIEWPORTS = {
   mobile: { width: 375, height: 667 }
 };
 
-// Maximum screenshot height (Claude API limit)
-const MAX_SCREENSHOT_HEIGHT = 7500;
+// Maximum image dimension for Claude API (8000px limit, using 7500px for safety)
+const MAX_IMAGE_DIMENSION = 7500;
+
+/**
+ * Resize image if it exceeds the maximum dimension
+ * Maintains aspect ratio while scaling down
+ * @param {Buffer} imageBuffer - Original image buffer
+ * @param {number} quality - JPEG quality 0-100
+ * @returns {Promise<Buffer>} Resized image buffer (or original if within limits)
+ */
+async function resizeIfNeeded(imageBuffer, quality = 70) {
+  try {
+    // Get image metadata
+    const metadata = await sharp(imageBuffer).metadata();
+    const { width, height } = metadata;
+
+    console.log(`[SHARP] Image dimensions: ${width}x${height}`);
+
+    // Check if resizing is needed
+    if (width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION) {
+      console.log(`[SHARP] Image within limits, no resize needed`);
+      return imageBuffer;
+    }
+
+    // Calculate new dimensions maintaining aspect ratio
+    let newWidth = width;
+    let newHeight = height;
+
+    if (height > width && height > MAX_IMAGE_DIMENSION) {
+      // Height is the limiting factor
+      newHeight = MAX_IMAGE_DIMENSION;
+      newWidth = Math.round((width / height) * MAX_IMAGE_DIMENSION);
+    } else if (width > MAX_IMAGE_DIMENSION) {
+      // Width is the limiting factor
+      newWidth = MAX_IMAGE_DIMENSION;
+      newHeight = Math.round((height / width) * MAX_IMAGE_DIMENSION);
+    }
+
+    console.log(`[SHARP] Resizing from ${width}x${height} to ${newWidth}x${newHeight}`);
+
+    // Resize the image
+    const resizedBuffer = await sharp(imageBuffer)
+      .resize(newWidth, newHeight, {
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .jpeg({ quality: Math.min(100, Math.max(0, quality)) })
+      .toBuffer();
+
+    console.log(`[SHARP] Resized image: ${resizedBuffer.length} bytes`);
+
+    return resizedBuffer;
+  } catch (error) {
+    console.error(`[SHARP] Error resizing image:`, error.message);
+    // Return original buffer if resize fails
+    return imageBuffer;
+  }
+}
 
 /**
  * Capture a full-page screenshot with the specified viewport
- * Height is capped at 7500px to comply with Claude API limits
+ * Images exceeding 7500px in any dimension are automatically resized
  * @param {string} url - The URL to capture
  * @param {string} viewport - 'desktop' | 'tablet' | 'mobile'
  * @param {boolean} fullPage - Whether to capture full page (default: true)
  * @param {number} quality - JPEG quality 0-100 (default: 70)
- * @returns {Buffer} Raw JPEG image bytes
+ * @returns {Promise<Buffer>} Raw JPEG image bytes (resized if needed)
  */
 async function captureScreenshot(url, viewport = 'desktop', fullPage = true, quality = 70) {
   let browser;
@@ -46,42 +103,25 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
 
     await page.waitForTimeout(2000);
 
-    // Get the full page height
-    const pageHeight = await page.evaluate(() => document.documentElement.scrollHeight);
-    const pageWidth = dimensions.width;
-
-    console.log(`[PLAYWRIGHT] Page dimensions: ${pageWidth}x${pageHeight}`);
-
-    let buffer;
-
-    if (fullPage !== false && pageHeight > MAX_SCREENSHOT_HEIGHT) {
-      // Page exceeds max height - capture with clip to cap at 7500px
-      console.log(`[PLAYWRIGHT] Page height ${pageHeight}px exceeds limit, capping at ${MAX_SCREENSHOT_HEIGHT}px`);
-      
-      buffer = await page.screenshot({
-        type: 'jpeg',
-        quality: Math.min(100, Math.max(0, quality)),
-        clip: {
-          x: 0,
-          y: 0,
-          width: pageWidth,
-          height: MAX_SCREENSHOT_HEIGHT
-        }
-      });
-    } else {
-      // Page is within limits - capture normally
-      buffer = await page.screenshot({
-        type: 'jpeg',
-        fullPage: fullPage !== false,
-        quality: Math.min(100, Math.max(0, quality))
-      });
-    }
+    // Capture the full page screenshot
+    const rawBuffer = await page.screenshot({
+      type: 'jpeg',
+      fullPage: fullPage !== false,
+      quality: Math.min(100, Math.max(0, quality))
+    });
 
     await browser.close();
 
-    console.log(`[PLAYWRIGHT] Screenshot captured: ${viewport} - ${buffer.length} bytes`);
+    console.log(`[PLAYWRIGHT] Raw screenshot captured: ${viewport} - ${rawBuffer.length} bytes`);
 
-    return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    // Resize if needed to comply with Claude API limits
+    const finalBuffer = await resizeIfNeeded(rawBuffer, quality);
+
+    const buffer = Buffer.isBuffer(finalBuffer) ? finalBuffer : Buffer.from(finalBuffer);
+    
+    console.log(`[PLAYWRIGHT] Final screenshot: ${buffer.length} bytes`);
+
+    return buffer;
   } catch (error) {
     console.error(`[PLAYWRIGHT] Error capturing screenshot ${viewport} for ${url}:`, error.message);
 
@@ -95,5 +135,7 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
 
 module.exports = {
   captureScreenshot,
-  VIEWPORTS
+  resizeIfNeeded,
+  VIEWPORTS,
+  MAX_IMAGE_DIMENSION
 };

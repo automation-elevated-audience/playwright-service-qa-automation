@@ -1,7 +1,7 @@
 {
   "name": "playwright-link-checker-service",
   "version": "1.0.0",
-  "description": "Playwright service for checking broken links",
+  "description": "Playwright service for checking broken links and capturing screenshots",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -10,6 +10,7 @@
   "keywords": [
     "playwright",
     "link-checker",
+    "screenshot",
     "qa"
   ],
   "author": "",
@@ -19,7 +20,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "playwright": "^1.58.1"
+    "playwright": "^1.58.1",
+    "sharp": "^0.33.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
