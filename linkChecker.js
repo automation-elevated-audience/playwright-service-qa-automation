@@ -182,7 +182,7 @@ async function checkPageLinks(pageUrl) {
  * @param {number} concurrency - Number of pages to check concurrently
  * @returns {Array} Array of results
  */
-async function checkMultiplePages(pages, concurrency = 3) {
+async function checkMultiplePages(pages, concurrency = 1) {
   const results = [];
   
   // Process pages in batches

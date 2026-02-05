@@ -60,7 +60,7 @@ app.post('/check-links', async (req, res) => {
     }
     
     // Get concurrency from query params or use default
-    const concurrency = parseInt(req.query.concurrency) || 3;
+    const concurrency = parseInt(req.query.concurrency) || parseInt(process.env.MAX_CONCURRENCY) || 1;
     
     // Check links for all pages
     const startTime = Date.now();

@@ -69,7 +69,7 @@ Request Body:
 ```
 
 Query Parameters:
-- `concurrency` (optional): Number of pages to check concurrently (default: 3)
+- `concurrency` (optional): Number of pages to check concurrently (default: 1)
 
 Response:
 ```json
@@ -110,7 +110,7 @@ Create a `.env` file:
 PORT=3001
 NODE_ENV=development
 REQUEST_TIMEOUT=30000
-MAX_CONCURRENCY=3
+MAX_CONCURRENCY=1
 ```
 
 ## Integration with Frontend
