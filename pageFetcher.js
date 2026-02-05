@@ -13,7 +13,23 @@ async function fetchPage(pageUrl) {
 
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',    // Don't use /dev/shm (limited on containers)
+        '--disable-gpu',               // Disable GPU (not needed)
+        '--single-process',            // Use single process (saves memory)
+        '--no-zygote',                 // Disable zygote process
+        '--disable-extensions',        // Disable extensions
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-first-run',
+        '--safebrowsing-disable-auto-update'
+      ]
     });
 
     const context = await browser.newContext({
