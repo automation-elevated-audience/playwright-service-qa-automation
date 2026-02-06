@@ -2,6 +2,51 @@ const { chromium } = require('playwright');
 const axios = require('axios');
 
 /**
+ * Check if a URL is an HTTP/HTTPS link that should be checked
+ * Skips tel:, mailto:, javascript:, #anchors, data:, blob:, etc.
+ * @param {string} href - The link href
+ * @returns {boolean} True if link should be checked
+ */
+function isCheckableLink(href) {
+  if (!href) return false;
+  
+  // Skip non-HTTP protocols
+  const skipProtocols = [
+    'tel:',
+    'mailto:',
+    'javascript:',
+    'data:',
+    'blob:',
+    'file:',
+    'ftp:',
+    'sms:',
+    'whatsapp:',
+    'viber:',
+    'skype:',
+    'facetime:',
+    'maps:',
+    'geo:'
+  ];
+  
+  const lowerHref = href.toLowerCase();
+  
+  // Skip if starts with any non-HTTP protocol
+  for (const protocol of skipProtocols) {
+    if (lowerHref.startsWith(protocol)) {
+      return false;
+    }
+  }
+  
+  // Skip anchor-only links
+  if (href.startsWith('#')) {
+    return false;
+  }
+  
+  // Only check http:// and https:// links
+  return lowerHref.startsWith('http://') || lowerHref.startsWith('https://');
+}
+
+/**
  * Check all links on a given page
  * @param {string} pageUrl - The URL to check
  * @returns {Object} Link check results
@@ -75,6 +120,11 @@ async function checkPageLinks(pageUrl) {
     
     for (const link of links) {
       try {
+        // Skip non-HTTP links (tel:, mailto:, javascript:, etc.)
+        if (!isCheckableLink(link.href)) {
+          continue;
+        }
+        
         const linkUrl = new URL(link.href);
         
         // Determine if external
@@ -83,7 +133,7 @@ async function checkPageLinks(pageUrl) {
         if (isExternal) {
           externalLinks++;
           
-          // Check security attributes for external links
+          // Check security attributes for external links (only for http/https that open in browser)
           const hasNoopener = link.rel.includes('noopener');
           const hasNoreferrer = link.rel.includes('noreferrer');
           
