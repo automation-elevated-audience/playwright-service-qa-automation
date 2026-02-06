@@ -13,26 +13,9 @@ async function fetchGoogleDocContent(docLink) {
 
   console.log(`[CONTENT] Fetching Google Doc content from: ${docLink}`);
 
-  // Extract document ID from various Google Docs URL formats
-  let docId = null;
-  
-  // Format: https://docs.google.com/document/d/{DOC_ID}/edit
-  // Format: https://docs.google.com/document/d/{DOC_ID}/view
-  // Format: https://docs.google.com/document/d/{DOC_ID}
-  const docIdMatch = docLink.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-  if (docIdMatch) {
-    docId = docIdMatch[1];
-  }
-
-  if (!docId) {
-    console.log(`[CONTENT] Could not extract document ID from: ${docLink}`);
-    return '';
-  }
-
-  console.log(`[CONTENT] Extracted document ID: ${docId}`);
-
-  // Use the export URL to get plain text (works for publicly shared docs)
-  const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
+  // Check if this is already a published URL (/pub at the end)
+  // Published URLs have format: /document/d/e/LONG_ID/pub
+  const isPublishedUrl = docLink.includes('/pub') && docLink.includes('/document/d/e/');
   
   let browser;
   try {
@@ -51,6 +34,58 @@ async function fetchGoogleDocContent(docLink) {
     });
 
     const page = await context.newPage();
+
+    // If it's already a published URL, use it directly (PRIORITY)
+    if (isPublishedUrl) {
+      console.log(`[CONTENT] Detected published URL, using directly: ${docLink}`);
+      try {
+        await page.goto(docLink, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+
+        await page.waitForTimeout(2000);
+
+        const publishedContent = await page.evaluate(() => {
+          // Remove style and script elements
+          const clone = document.body.cloneNode(true);
+          clone.querySelectorAll('script, style, noscript, header, footer, nav, [role="navigation"]').forEach(el => el.remove());
+          return clone.textContent || '';
+        });
+
+        if (publishedContent && publishedContent.trim().length > 50) {
+          console.log(`[CONTENT] Successfully fetched from published URL (${publishedContent.length} chars)`);
+          await browser.close();
+          return publishedContent.trim();
+        }
+      } catch (pubError) {
+        console.log(`[CONTENT] Published URL fetch failed: ${pubError.message}`);
+      }
+      
+      await browser.close();
+      return '';
+    }
+
+    // For regular share links, extract document ID
+    // Format: https://docs.google.com/document/d/{DOC_ID}/edit
+    // Format: https://docs.google.com/document/d/{DOC_ID}/view
+    // Format: https://docs.google.com/document/d/{DOC_ID}
+    const docIdMatch = docLink.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+    let docId = null;
+    if (docIdMatch) {
+      docId = docIdMatch[1];
+    }
+
+    if (!docId) {
+      console.log(`[CONTENT] Could not extract document ID from: ${docLink}`);
+      await browser.close();
+      return '';
+    }
+
+    console.log(`[CONTENT] Extracted document ID: ${docId}`);
+
+    // Use the export URL to get plain text (works for publicly shared docs)
+    const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
 
     // Try the export URL first (plain text)
     try {
