@@ -17,6 +17,57 @@ async function fetchGoogleDocContent(docLink) {
   // Published URLs have format: /document/d/e/LONG_ID/pub
   const isPublishedUrl = docLink.includes('/pub') && docLink.includes('/document/d/e/');
   
+  // For regular share links, extract document ID FIRST (before launching browser)
+  // Format: https://docs.google.com/document/d/{DOC_ID}/edit
+  // Format: https://docs.google.com/document/d/{DOC_ID}/view
+  // Format: https://docs.google.com/document/d/{DOC_ID}
+  let docId = null;
+  if (!isPublishedUrl) {
+    const docIdMatch = docLink.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+    if (docIdMatch) {
+      docId = docIdMatch[1];
+    }
+    
+    if (!docId) {
+      console.log(`[CONTENT] Could not extract document ID from: ${docLink}`);
+      return '';
+    }
+    
+    console.log(`[CONTENT] Extracted document ID: ${docId}`);
+    
+    // ========================================================================
+    // PRIMARY METHOD: Use HTTP fetch for export URL (faster, no browser needed)
+    // This works for docs shared as "Anyone with the link can view"
+    // ========================================================================
+    const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
+    console.log(`[CONTENT] Trying HTTP fetch for: ${exportUrl}`);
+    
+    try {
+      const response = await fetch(exportUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      
+      if (response.ok) {
+        const textContent = await response.text();
+        if (textContent && textContent.trim().length > 10) {
+          console.log(`[CONTENT] Successfully fetched via HTTP fetch (${textContent.length} chars)`);
+          return textContent.trim();
+        }
+      } else {
+        console.log(`[CONTENT] HTTP fetch failed with status: ${response.status}`);
+      }
+    } catch (fetchError) {
+      console.log(`[CONTENT] HTTP fetch failed: ${fetchError.message}`);
+    }
+    
+    console.log(`[CONTENT] HTTP fetch failed, falling back to Playwright methods...`);
+  }
+  
+  // ========================================================================
+  // FALLBACK: Use Playwright for published URLs or when HTTP fetch fails
+  // ========================================================================
   let browser;
   try {
     browser = await chromium.launch({
@@ -66,54 +117,8 @@ async function fetchGoogleDocContent(docLink) {
       return '';
     }
 
-    // For regular share links, extract document ID
-    // Format: https://docs.google.com/document/d/{DOC_ID}/edit
-    // Format: https://docs.google.com/document/d/{DOC_ID}/view
-    // Format: https://docs.google.com/document/d/{DOC_ID}
-    const docIdMatch = docLink.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-    let docId = null;
-    if (docIdMatch) {
-      docId = docIdMatch[1];
-    }
-
-    if (!docId) {
-      console.log(`[CONTENT] Could not extract document ID from: ${docLink}`);
-      await browser.close();
-      return '';
-    }
-
-    console.log(`[CONTENT] Extracted document ID: ${docId}`);
-
-    // Use the export URL to get plain text (works for publicly shared docs)
-    const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
-
-    // Try the export URL first (plain text)
-    try {
-      const response = await page.goto(exportUrl, {
-        waitUntil: 'networkidle',
-        timeout: 30000
-      });
-
-      if (response && response.ok()) {
-        const content = await page.content();
-        // For text export, the content is in a <pre> tag or raw
-        const textContent = await page.evaluate(() => {
-          const pre = document.querySelector('pre');
-          if (pre) return pre.textContent;
-          return document.body.textContent || document.body.innerText || '';
-        });
-
-        if (textContent && textContent.trim().length > 10) {
-          console.log(`[CONTENT] Successfully fetched doc content (${textContent.length} chars)`);
-          await browser.close();
-          return textContent.trim();
-        }
-      }
-    } catch (exportError) {
-      console.log(`[CONTENT] Export URL failed, trying published view: ${exportError.message}`);
-    }
-
-    // Fallback: Try the published web view
+    // Playwright fallback for regular share links (when HTTP fetch failed)
+    // Try the published web view first
     const publishedUrl = `https://docs.google.com/document/d/${docId}/pub`;
     try {
       await page.goto(publishedUrl, {
