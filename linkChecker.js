@@ -47,6 +47,55 @@ function isCheckableLink(href) {
 }
 
 /**
+ * Check if a URL is a social media site that should be skipped from broken link checks
+ * These sites often block automated requests and return false positives
+ * @param {string} href - The link href
+ * @returns {boolean} True if link is a social media site to skip
+ */
+function isSocialMediaLink(href) {
+  if (!href) return false;
+  
+  const socialMediaDomains = [
+    'instagram.com',
+    'www.instagram.com',
+    'facebook.com',
+    'www.facebook.com',
+    'fb.com',
+    'twitter.com',
+    'www.twitter.com',
+    'x.com',
+    'www.x.com',
+    'linkedin.com',
+    'www.linkedin.com',
+    'tiktok.com',
+    'www.tiktok.com',
+    'pinterest.com',
+    'www.pinterest.com',
+    'snapchat.com',
+    'www.snapchat.com',
+    'youtube.com',
+    'www.youtube.com',
+    'youtu.be',
+    'reddit.com',
+    'www.reddit.com',
+    'tumblr.com',
+    'www.tumblr.com',
+    'discord.com',
+    'discord.gg',
+    'threads.net',
+    'www.threads.net'
+  ];
+  
+  try {
+    const url = new URL(href);
+    const hostname = url.hostname.toLowerCase();
+    return socialMediaDomains.some(domain => hostname === domain || hostname.endsWith('.' + domain));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check all links on a given page
  * @param {string} pageUrl - The URL to check
  * @returns {Object} Link check results
@@ -140,6 +189,12 @@ async function checkPageLinks(pageUrl) {
           if (!hasNoopener || !hasNoreferrer) {
             missingNoopener++;
             linksWithoutNoopener.push(link.href);
+          }
+          
+          // Skip social media sites from broken link check (they block bots and return false positives)
+          if (isSocialMediaLink(link.href)) {
+            console.log(`[PLAYWRIGHT] Skipping social media link: ${link.href}`);
+            continue;
           }
           
           // Check if link is broken (with timeout)
