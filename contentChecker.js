@@ -1,6 +1,168 @@
 const { chromium } = require('playwright');
 
 /**
+ * Fetch content from a Google Doc link
+ * Supports various Google Docs URL formats and extracts the text content
+ * @param {string} docLink - Google Docs URL
+ * @returns {Promise<string>} The text content of the document
+ */
+async function fetchGoogleDocContent(docLink) {
+  if (!docLink || typeof docLink !== 'string') {
+    return '';
+  }
+
+  console.log(`[CONTENT] Fetching Google Doc content from: ${docLink}`);
+
+  // Extract document ID from various Google Docs URL formats
+  let docId = null;
+  
+  // Format: https://docs.google.com/document/d/{DOC_ID}/edit
+  // Format: https://docs.google.com/document/d/{DOC_ID}/view
+  // Format: https://docs.google.com/document/d/{DOC_ID}
+  const docIdMatch = docLink.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+  if (docIdMatch) {
+    docId = docIdMatch[1];
+  }
+
+  if (!docId) {
+    console.log(`[CONTENT] Could not extract document ID from: ${docLink}`);
+    return '';
+  }
+
+  console.log(`[CONTENT] Extracted document ID: ${docId}`);
+
+  // Use the export URL to get plain text (works for publicly shared docs)
+  const exportUrl = `https://docs.google.com/document/d/${docId}/export?format=txt`;
+  
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu'
+      ]
+    });
+
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    });
+
+    const page = await context.newPage();
+
+    // Try the export URL first (plain text)
+    try {
+      const response = await page.goto(exportUrl, {
+        waitUntil: 'networkidle',
+        timeout: 30000
+      });
+
+      if (response && response.ok()) {
+        const content = await page.content();
+        // For text export, the content is in a <pre> tag or raw
+        const textContent = await page.evaluate(() => {
+          const pre = document.querySelector('pre');
+          if (pre) return pre.textContent;
+          return document.body.textContent || document.body.innerText || '';
+        });
+
+        if (textContent && textContent.trim().length > 10) {
+          console.log(`[CONTENT] Successfully fetched doc content (${textContent.length} chars)`);
+          await browser.close();
+          return textContent.trim();
+        }
+      }
+    } catch (exportError) {
+      console.log(`[CONTENT] Export URL failed, trying published view: ${exportError.message}`);
+    }
+
+    // Fallback: Try the published web view
+    const publishedUrl = `https://docs.google.com/document/d/${docId}/pub`;
+    try {
+      await page.goto(publishedUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000
+      });
+
+      await page.waitForTimeout(2000);
+
+      const publishedContent = await page.evaluate(() => {
+        // Remove style and script elements
+        const clone = document.body.cloneNode(true);
+        clone.querySelectorAll('script, style, noscript, header, footer, nav').forEach(el => el.remove());
+        return clone.textContent || '';
+      });
+
+      if (publishedContent && publishedContent.trim().length > 10) {
+        console.log(`[CONTENT] Successfully fetched from published view (${publishedContent.length} chars)`);
+        await browser.close();
+        return publishedContent.trim();
+      }
+    } catch (pubError) {
+      console.log(`[CONTENT] Published view failed: ${pubError.message}`);
+    }
+
+    // Final fallback: Try the regular edit/view URL (for publicly viewable docs)
+    try {
+      await page.goto(docLink, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000
+      });
+
+      await page.waitForTimeout(3000);
+
+      const viewContent = await page.evaluate(() => {
+        // Google Docs renders content in specific elements
+        const contentSelectors = [
+          '.kix-page-content-wrapper',
+          '.kix-paragraphrenderer',
+          '[data-page-content="true"]',
+          '.doc-content',
+          '#contents'
+        ];
+
+        let content = '';
+        for (const selector of contentSelectors) {
+          const elements = document.querySelectorAll(selector);
+          if (elements.length > 0) {
+            content = Array.from(elements).map(el => el.textContent).join('\n');
+            break;
+          }
+        }
+
+        // Fallback to body
+        if (!content) {
+          const clone = document.body.cloneNode(true);
+          clone.querySelectorAll('script, style, noscript, header, nav, [role="navigation"]').forEach(el => el.remove());
+          content = clone.textContent || '';
+        }
+
+        return content;
+      });
+
+      if (viewContent && viewContent.trim().length > 10) {
+        console.log(`[CONTENT] Successfully fetched from view URL (${viewContent.length} chars)`);
+        await browser.close();
+        return viewContent.trim();
+      }
+    } catch (viewError) {
+      console.log(`[CONTENT] View URL failed: ${viewError.message}`);
+    }
+
+    await browser.close();
+    console.log(`[CONTENT] Could not fetch content from Google Doc`);
+    return '';
+
+  } catch (error) {
+    console.error(`[CONTENT] Error fetching Google Doc:`, error.message);
+    if (browser) await browser.close();
+    return '';
+  }
+}
+
+/**
  * Normalize text for comparison
  * - Converts to lowercase
  * - Removes extra whitespace
@@ -97,22 +259,43 @@ function findMissingPhrases(expectedContent, actualContent) {
 /**
  * Check page content against expected content
  * @param {string} pageUrl - URL to check
- * @param {string} expectedContent - Expected content from doc
+ * @param {string} expectedContent - Expected content from doc (direct text)
+ * @param {string} contentDocLink - Optional Google Docs link to fetch expected content from
  * @returns {Object} Content check results
  */
-async function checkPageContent(pageUrl, expectedContent) {
-  // If no expected content provided, return skip status
-  if (!expectedContent || expectedContent.trim().length === 0) {
+async function checkPageContent(pageUrl, expectedContent, contentDocLink = null) {
+  let contentToCompare = expectedContent || '';
+
+  // If no direct content but we have a doc link, fetch from Google Docs
+  if ((!contentToCompare || contentToCompare.trim().length === 0) && contentDocLink) {
+    console.log(`[CONTENT] No direct content provided, fetching from Google Doc: ${contentDocLink}`);
+    contentToCompare = await fetchGoogleDocContent(contentDocLink);
+    
+    if (contentToCompare && contentToCompare.trim().length > 0) {
+      console.log(`[CONTENT] Successfully fetched ${contentToCompare.length} characters from Google Doc`);
+    } else {
+      console.log(`[CONTENT] Could not fetch content from Google Doc link`);
+    }
+  }
+
+  // If still no expected content, return skip status
+  if (!contentToCompare || contentToCompare.trim().length === 0) {
     return {
       status: 'SKIPPED',
-      reason: 'No expected content provided',
+      reason: contentDocLink 
+        ? 'Could not fetch content from Google Doc link (may require public sharing)'
+        : 'No expected content provided',
       matchPercentage: null,
       missingPhrases: [],
       wordCountExpected: 0,
       wordCountActual: 0,
-      contentChecked: false
+      contentChecked: false,
+      contentDocLink: contentDocLink || null
     };
   }
+
+  // Use the fetched/provided content
+  const expectedContentFinal = contentToCompare;
 
   let browser;
   
@@ -198,9 +381,9 @@ async function checkPageContent(pageUrl, expectedContent) {
     await browser.close();
     
     // Calculate metrics
-    const matchPercentage = calculateSimilarity(expectedContent, actualContent);
-    const missingPhrases = findMissingPhrases(expectedContent, actualContent);
-    const wordCountExpected = expectedContent.split(/\s+/).filter(w => w.length > 0).length;
+    const matchPercentage = calculateSimilarity(expectedContentFinal, actualContent);
+    const missingPhrases = findMissingPhrases(expectedContentFinal, actualContent);
+    const wordCountExpected = expectedContentFinal.split(/\s+/).filter(w => w.length > 0).length;
     const wordCountActual = actualContent.split(/\s+/).filter(w => w.length > 0).length;
     
     // Determine status based on match percentage
@@ -260,6 +443,7 @@ async function checkPageContent(pageUrl, expectedContent) {
 
 module.exports = {
   checkPageContent,
+  fetchGoogleDocContent,
   normalizeText,
   calculateSimilarity,
   findMissingPhrases,

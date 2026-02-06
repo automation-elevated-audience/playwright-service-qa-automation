@@ -145,9 +145,10 @@ app.post('/screenshot', async (req, res) => {
 });
 
 // Check page content against expected content
+// Accepts either direct expectedContent text OR a contentDocLink (Google Docs URL)
 app.post('/check-content', async (req, res) => {
   try {
-    const { url, expectedContent } = req.body;
+    const { url, expectedContent, contentDocLink } = req.body;
 
     if (!url || typeof url !== 'string') {
       return res.status(400).json({
@@ -157,7 +158,11 @@ app.post('/check-content', async (req, res) => {
     }
 
     console.log(`[SERVER] Checking content for: ${url}`);
-    const result = await checkPageContent(url, expectedContent || '');
+    if (contentDocLink) {
+      console.log(`[SERVER] Using Google Doc link: ${contentDocLink}`);
+    }
+    
+    const result = await checkPageContent(url, expectedContent || '', contentDocLink || null);
     
     res.json({
       success: true,
