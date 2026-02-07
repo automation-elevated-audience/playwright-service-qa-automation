@@ -162,10 +162,14 @@ async function checkPageLinks(pageUrl) {
     
     // Check each link
     const brokenLinks = [];
+    const brokenInternalLinks = [];
     const linksWithoutNoopener = [];
     let externalLinks = 0;
     let internalLinks = 0;
     let missingNoopener = 0;
+    
+    // De-duplicate links to avoid checking the same URL multiple times
+    const checkedUrls = new Set();
     
     for (const link of links) {
       try {
@@ -173,6 +177,12 @@ async function checkPageLinks(pageUrl) {
         if (!isCheckableLink(link.href)) {
           continue;
         }
+        
+        // Skip already-checked URLs (de-duplicate)
+        if (checkedUrls.has(link.href)) {
+          continue;
+        }
+        checkedUrls.add(link.href);
         
         const linkUrl = new URL(link.href);
         
@@ -197,7 +207,7 @@ async function checkPageLinks(pageUrl) {
             continue;
           }
           
-          // Check if link is broken (with timeout)
+          // Check if external link is broken (with timeout)
           try {
             const response = await axios.head(link.href, { 
               timeout: 5000,
@@ -222,6 +232,38 @@ async function checkPageLinks(pageUrl) {
           }
         } else {
           internalLinks++;
+          
+          // Check if internal link is broken (with timeout)
+          console.log(`[PLAYWRIGHT] Checking internal link: ${link.href}`);
+          try {
+            const response = await axios.head(link.href, { 
+              timeout: 10000,
+              maxRedirects: 5,
+              validateStatus: (status) => status < 500
+            });
+            
+            if (response.status >= 400) {
+              console.log(`[PLAYWRIGHT] Broken internal link (${response.status}): ${link.href}`);
+              brokenInternalLinks.push(link.href);
+            }
+          } catch (error) {
+            // If HEAD fails, try GET (some servers don't support HEAD)
+            try {
+              const response = await axios.get(link.href, { 
+                timeout: 10000,
+                maxRedirects: 5,
+                validateStatus: (status) => status < 500
+              });
+              
+              if (response.status >= 400) {
+                console.log(`[PLAYWRIGHT] Broken internal link (${response.status}): ${link.href}`);
+                brokenInternalLinks.push(link.href);
+              }
+            } catch (err) {
+              console.log(`[PLAYWRIGHT] Broken internal link (unreachable): ${link.href}`);
+              brokenInternalLinks.push(link.href);
+            }
+          }
         }
       } catch (error) {
         // Invalid URL, skip
@@ -231,17 +273,31 @@ async function checkPageLinks(pageUrl) {
     
     await browser.close();
     
-    const overall = brokenLinks.length > 0 || missingNoopener > 0 ? 'FAIL' : 'PASS';
+    // Combine all broken links for overall status
+    const allBrokenLinks = [...brokenLinks, ...brokenInternalLinks];
+    const overall = allBrokenLinks.length > 0 || missingNoopener > 0 ? 'FAIL' : 'PASS';
     
     let issue = null;
+    const issues = [];
+    if (brokenInternalLinks.length > 0) {
+      issues.push(`${brokenInternalLinks.length} broken internal link${brokenInternalLinks.length !== 1 ? 's' : ''} found`);
+    }
+    if (brokenLinks.length > 0) {
+      issues.push(`${brokenLinks.length} broken external link${brokenLinks.length !== 1 ? 's' : ''} found`);
+    }
     if (missingNoopener > 0) {
-      issue = `${missingNoopener} external link${missingNoopener !== 1 ? 's are' : ' is'} missing noopener/noreferrer attributes, creating security vulnerability`;
+      issues.push(`${missingNoopener} external link${missingNoopener !== 1 ? 's are' : ' is'} missing noopener/noreferrer attributes, creating security vulnerability`);
+    }
+    if (issues.length > 0) {
+      issue = issues.join('; ');
     }
     
     console.log(`[PLAYWRIGHT] Results for ${pageUrl}:`, {
       overall,
       externalLinks,
-      brokenCount: brokenLinks.length,
+      internalLinks,
+      brokenExternalCount: brokenLinks.length,
+      brokenInternalCount: brokenInternalLinks.length,
       missingNoopener
     });
     
@@ -250,8 +306,12 @@ async function checkPageLinks(pageUrl) {
       externalLinks,
       internalLinks,
       totalLinks: links.length,
-      brokenLinks: brokenLinks.slice(0, 10), // Limit to 10 URLs
-      brokenCount: brokenLinks.length,
+      brokenLinks: allBrokenLinks.slice(0, 10), // Limit to 10 URLs
+      brokenCount: allBrokenLinks.length,
+      brokenExternalLinks: brokenLinks.slice(0, 10),
+      brokenExternalCount: brokenLinks.length,
+      brokenInternalLinks: brokenInternalLinks.slice(0, 10),
+      brokenInternalCount: brokenInternalLinks.length,
       missingNoopener,
       linksWithoutNoopener: linksWithoutNoopener.slice(0, 10), // Limit to 10 URLs
       securityIssue: missingNoopener > 0,
@@ -272,6 +332,10 @@ async function checkPageLinks(pageUrl) {
       totalLinks: 0,
       brokenLinks: [],
       brokenCount: 0,
+      brokenExternalLinks: [],
+      brokenExternalCount: 0,
+      brokenInternalLinks: [],
+      brokenInternalCount: 0,
       missingNoopener: 0,
       linksWithoutNoopener: [],
       securityIssue: false,
