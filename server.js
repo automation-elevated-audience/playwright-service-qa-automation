@@ -249,6 +249,26 @@ app.post('/start-qa', async (req, res) => {
     });
   }
 
+  // Guard 0: Check for duplicate staging URL in the database
+  if (supabase && project_data.staging_url) {
+    try {
+      const { data: existing } = await supabase
+        .from('projects')
+        .select('id, name')
+        .eq('staging_url', project_data.staging_url)
+        .limit(1);
+      if (existing && existing.length > 0) {
+        console.log(`[START-QA] Rejected - duplicate staging URL "${project_data.staging_url}" (project: "${existing[0].name}")`);
+        return res.status(409).json({
+          error: 'duplicate_project',
+          message: `A project with this staging URL already exists ("${existing[0].name}").`,
+        });
+      }
+    } catch (err) {
+      console.warn('[START-QA] Duplicate check failed, continuing:', err.message);
+    }
+  }
+
   // Guard 1: Check if n8n is still processing any project in the database
   const n8nStatus = await isN8nBusy();
   if (n8nStatus.busy) {
