@@ -14,6 +14,11 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || '';
 
+// Track active background jobs to prevent duplicate processing
+// Key: job identifier (project_id for reruns, project_name for start-qa)
+// Value: { type: 'start-qa' | 'rerun', startedAt: Date }
+const activeJobs = new Map();
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -204,6 +209,23 @@ app.post('/start-qa', async (req, res) => {
     });
   }
 
+  // Guard: prevent duplicate start-qa for the same project name
+  const jobKey = `start-qa:${project_data.project_name}`;
+  if (activeJobs.has(jobKey)) {
+    const existing = activeJobs.get(jobKey);
+    const elapsed = Math.round((Date.now() - existing.startedAt) / 1000);
+    console.log(`[START-QA] Rejected duplicate request for "${project_data.project_name}" (running for ${elapsed}s)`);
+    return res.status(409).json({
+      error: 'already_running',
+      message: `QA is already starting for "${project_data.project_name}". Please wait for it to finish.`,
+      started_at: existing.startedAt,
+      elapsed_seconds: elapsed
+    });
+  }
+
+  // Register this job as active
+  activeJobs.set(jobKey, { type: 'start-qa', startedAt: Date.now() });
+
   // Respond immediately so the browser can navigate away safely
   res.json({ status: 'processing', project_name: project_data.project_name });
 
@@ -260,6 +282,9 @@ app.post('/start-qa', async (req, res) => {
       console.log(`[START-QA] n8n responded for "${project_data.project_name}":`, n8nResponse.status);
     } catch (error) {
       console.error(`[START-QA] Background processing failed for "${project_data.project_name}":`, error.message);
+    } finally {
+      activeJobs.delete(jobKey);
+      console.log(`[START-QA] Job removed from activeJobs: "${project_data.project_name}"`);
     }
   })();
 });
@@ -286,6 +311,23 @@ app.post('/rerun', async (req, res) => {
       message: 'n8n webhook URL is not configured. Set N8N_WEBHOOK_URL in .env or pass n8n_webhook_url in the request body.'
     });
   }
+
+  // Guard: prevent duplicate rerun for the same project
+  const jobKey = `rerun:${project_id}`;
+  if (activeJobs.has(jobKey)) {
+    const existing = activeJobs.get(jobKey);
+    const elapsed = Math.round((Date.now() - existing.startedAt) / 1000);
+    console.log(`[RERUN] Rejected duplicate request for project ${project_id} (running for ${elapsed}s)`);
+    return res.status(409).json({
+      error: 'already_running',
+      message: 'A rerun is already in progress for this project. Please wait for it to finish.',
+      started_at: existing.startedAt,
+      elapsed_seconds: elapsed
+    });
+  }
+
+  // Register this job as active
+  activeJobs.set(jobKey, { type: 'rerun', startedAt: Date.now() });
 
   // Respond immediately so the browser can navigate away safely
   res.json({ status: 'processing', project_id });
@@ -344,6 +386,9 @@ app.post('/rerun', async (req, res) => {
       console.log(`[RERUN] n8n responded for project ${project_id}:`, n8nResponse.status);
     } catch (error) {
       console.error(`[RERUN] Background processing failed for project ${project_id}:`, error.message);
+    } finally {
+      activeJobs.delete(jobKey);
+      console.log(`[RERUN] Job removed from activeJobs: project ${project_id}`);
     }
   })();
 });
