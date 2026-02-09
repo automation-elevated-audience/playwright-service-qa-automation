@@ -209,17 +209,17 @@ app.post('/start-qa', async (req, res) => {
     });
   }
 
-  // Guard: prevent duplicate start-qa for the same project name
+  // Guard: only one job at a time across ALL projects (global lock)
   const jobKey = `start-qa:${project_data.project_name}`;
-  if (activeJobs.has(jobKey)) {
-    const existing = activeJobs.get(jobKey);
-    const elapsed = Math.round((Date.now() - existing.startedAt) / 1000);
-    console.log(`[START-QA] Rejected duplicate request for "${project_data.project_name}" (running for ${elapsed}s)`);
+  if (activeJobs.size > 0) {
+    const [existingKey, existingJob] = [...activeJobs.entries()][0];
+    const elapsed = Math.round((Date.now() - existingJob.startedAt) / 1000);
+    const jobLabel = existingJob.projectName || existingJob.projectId || existingKey;
+    console.log(`[START-QA] Rejected - server busy with "${jobLabel}" (running for ${elapsed}s)`);
     return res.status(409).json({
-      error: 'already_running',
-      message: `QA is already starting for "${project_data.project_name}". Please wait for it to finish.`,
-      started_at: existing.startedAt,
-      elapsed_seconds: elapsed
+      error: 'server_busy',
+      message: `Another job is currently running ("${jobLabel}"). Please wait for it to finish.`,
+      active_job: { type: existingJob.type, stage: existingJob.stage, elapsed_seconds: elapsed },
     });
   }
 
@@ -336,17 +336,17 @@ app.post('/rerun', async (req, res) => {
     });
   }
 
-  // Guard: prevent duplicate rerun for the same project
+  // Guard: only one job at a time across ALL projects (global lock)
   const jobKey = `rerun:${project_id}`;
-  if (activeJobs.has(jobKey)) {
-    const existing = activeJobs.get(jobKey);
-    const elapsed = Math.round((Date.now() - existing.startedAt) / 1000);
-    console.log(`[RERUN] Rejected duplicate request for project ${project_id} (running for ${elapsed}s)`);
+  if (activeJobs.size > 0) {
+    const [existingKey, existingJob] = [...activeJobs.entries()][0];
+    const elapsed = Math.round((Date.now() - existingJob.startedAt) / 1000);
+    const jobLabel = existingJob.projectName || existingJob.projectId || existingKey;
+    console.log(`[RERUN] Rejected - server busy with "${jobLabel}" (running for ${elapsed}s)`);
     return res.status(409).json({
-      error: 'already_running',
-      message: 'A rerun is already in progress for this project. Please wait for it to finish.',
-      started_at: existing.startedAt,
-      elapsed_seconds: elapsed
+      error: 'server_busy',
+      message: `Another job is currently running ("${jobLabel}"). Please wait for it to finish.`,
+      active_job: { type: existingJob.type, stage: existingJob.stage, elapsed_seconds: elapsed },
     });
   }
 
