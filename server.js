@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
 const { checkMultiplePages } = require('./linkChecker');
 const { fetchPage } = require('./pageFetcher');
 const { captureScreenshot } = require('./screenshotHandler');
@@ -13,6 +14,45 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || '';
+
+// Supabase client for checking if n8n is actively processing any project
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+if (supabase) {
+  console.log('[INIT] Supabase client initialized — n8n busy-check enabled');
+} else {
+  console.warn('[INIT] Supabase not configured — n8n busy-check disabled (set SUPABASE_URL and SUPABASE_ANON_KEY)');
+}
+
+/**
+ * Check if n8n is currently processing any project by querying the database
+ * for pages with 'in_progress' or 'processing' status.
+ * Returns { busy: true, projectName, count } or { busy: false }.
+ */
+async function isN8nBusy() {
+  if (!supabase) return { busy: false };
+  try {
+    const { data, error } = await supabase
+      .from('pages')
+      .select('id, project_id, projects(name)')
+      .in('status', ['in_progress', 'processing'])
+      .limit(1);
+    if (error) {
+      console.warn('[isN8nBusy] Supabase query error:', error.message);
+      return { busy: false }; // Fail open — don't block if DB query fails
+    }
+    if (!data || data.length === 0) return { busy: false };
+    const projectName = data[0]?.projects?.name || 'Unknown';
+    return { busy: true, projectName };
+  } catch (err) {
+    console.warn('[isN8nBusy] Exception:', err.message);
+    return { busy: false }; // Fail open
+  }
+}
 
 // Track active background jobs to prevent duplicate processing and report progress
 // Key: job identifier (e.g. "start-qa:ProjectName" or "rerun:uuid")
@@ -209,7 +249,18 @@ app.post('/start-qa', async (req, res) => {
     });
   }
 
-  // Guard: only one job at a time across ALL projects (global lock)
+  // Guard 1: Check if n8n is still processing any project in the database
+  const n8nStatus = await isN8nBusy();
+  if (n8nStatus.busy) {
+    console.log(`[START-QA] Rejected - n8n is busy processing "${n8nStatus.projectName}"`);
+    return res.status(409).json({
+      error: 'server_busy',
+      message: `Another project is being processed by the QA workflow ("${n8nStatus.projectName}"). Please wait for it to finish.`,
+      active_job: { type: 'n8n_processing', stage: 'n8n_workflow', elapsed_seconds: null },
+    });
+  }
+
+  // Guard 2: Only one job at a time across ALL projects (in-memory lock for Playwright phase)
   const jobKey = `start-qa:${project_data.project_name}`;
   if (activeJobs.size > 0) {
     const [existingKey, existingJob] = [...activeJobs.entries()][0];
@@ -336,7 +387,18 @@ app.post('/rerun', async (req, res) => {
     });
   }
 
-  // Guard: only one job at a time across ALL projects (global lock)
+  // Guard 1: Check if n8n is still processing any project in the database
+  const n8nStatus = await isN8nBusy();
+  if (n8nStatus.busy) {
+    console.log(`[RERUN] Rejected - n8n is busy processing "${n8nStatus.projectName}"`);
+    return res.status(409).json({
+      error: 'server_busy',
+      message: `Another project is being processed by the QA workflow ("${n8nStatus.projectName}"). Please wait for it to finish.`,
+      active_job: { type: 'n8n_processing', stage: 'n8n_workflow', elapsed_seconds: null },
+    });
+  }
+
+  // Guard 2: Only one job at a time across ALL projects (in-memory lock for Playwright phase)
   const jobKey = `rerun:${project_id}`;
   if (activeJobs.size > 0) {
     const [existingKey, existingJob] = [...activeJobs.entries()][0];
@@ -445,7 +507,7 @@ app.post('/rerun', async (req, res) => {
 // Job status endpoint for frontend polling
 // Returns real-time progress of active background jobs
 // ============================================================
-app.get('/job-status', (req, res) => {
+app.get('/job-status', async (req, res) => {
   const { project_name, project_id } = req.query;
 
   if (!project_name && !project_id) {
@@ -482,6 +544,21 @@ app.get('/job-status', (req, res) => {
   }
 
   if (!job) {
+    // No active Playwright job — but check if n8n is processing in the database.
+    // This keeps the frontend indicator alive during the n8n workflow phase.
+    const n8nStatus = await isN8nBusy();
+    if (n8nStatus.busy) {
+      return res.json({
+        found: true,
+        type: 'n8n_processing',
+        stage: 'n8n_workflow',
+        totalPages: null,
+        checkedPages: null,
+        startedAt: null,
+        elapsed_seconds: null,
+        projectName: n8nStatus.projectName,
+      });
+    }
     return res.json({ found: false });
   }
 
