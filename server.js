@@ -182,6 +182,89 @@ app.post('/check-content', async (req, res) => {
 });
 
 // ============================================================
+// Server-side start-qa orchestrator
+// Responds immediately, then runs link checks + forwards to n8n in the background
+// This ensures the process survives browser refresh/navigation/close
+// ============================================================
+app.post('/start-qa', async (req, res) => {
+  const { project_data, pages, settings, n8n_webhook_url } = req.body;
+
+  if (!project_data || !project_data.project_name) {
+    return res.status(400).json({
+      error: 'Invalid request',
+      message: 'project_data with project_name is required'
+    });
+  }
+
+  const webhookUrl = n8n_webhook_url || N8N_WEBHOOK_URL;
+  if (!webhookUrl) {
+    return res.status(400).json({
+      error: 'Configuration error',
+      message: 'n8n webhook URL is not configured. Set N8N_WEBHOOK_URL in .env or pass n8n_webhook_url in the request body.'
+    });
+  }
+
+  // Respond immediately so the browser can navigate away safely
+  res.json({ status: 'processing', project_name: project_data.project_name });
+
+  // Background processing - runs after response is sent
+  (async () => {
+    try {
+      console.log(`[START-QA] Starting server-side QA for "${project_data.project_name}" with ${(pages || []).length} pages`);
+
+      // Step 1: Run Playwright link checks on the provided pages
+      let pagesWithLinkChecks = pages || [];
+      if (pages && pages.length > 0) {
+        try {
+          const playwrightPages = pages.map(p => ({
+            url: p.page_url || p.pageUrl,
+            pageName: p.page_name || p.pageName || 'Page'
+          })).filter(p => p.url);
+
+          if (playwrightPages.length > 0) {
+            const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
+            const startTime = Date.now();
+            const linkResults = await checkMultiplePages(playwrightPages, concurrency);
+            const duration = Date.now() - startTime;
+            console.log(`[START-QA] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
+
+            // Enrich pages with link check results
+            pagesWithLinkChecks = pages.map(p => {
+              const pageUrl = (p.page_url || p.pageUrl || '').replace(/\/+$/, '');
+              const lr = linkResults.find(l => (l.url || '').replace(/\/+$/, '') === pageUrl);
+              return {
+                ...p,
+                link_checks: lr?.linkChecks || null
+              };
+            });
+          }
+        } catch (linkError) {
+          console.warn(`[START-QA] Link check failed, continuing without:`, linkError.message);
+        }
+      }
+
+      // Step 2: Forward the start request to n8n with enriched pages
+      const payload = {
+        ...project_data,
+        ...(settings || {}),
+        pages: pagesWithLinkChecks
+      };
+
+      console.log(`[START-QA] Forwarding to n8n: ${webhookUrl}/qa/start with ${pagesWithLinkChecks.length} pages`);
+
+      const n8nResponse = await axios.post(`${webhookUrl}/qa/start`, payload, {
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      console.log(`[START-QA] n8n responded for "${project_data.project_name}":`, n8nResponse.status);
+    } catch (error) {
+      console.error(`[START-QA] Background processing failed for "${project_data.project_name}":`, error.message);
+    }
+  })();
+});
+
+// ============================================================
 // Server-side rerun orchestrator
 // Responds immediately, then runs link checks + forwards to n8n in the background
 // This ensures the process survives browser refresh/navigation/close
@@ -299,6 +382,7 @@ const server = app.listen(PORT, () => {
 ║   • POST /fetch-page                                     ║
 ║   • POST /screenshot                                     ║
 ║   • POST /check-content                                  ║
+║   • POST /start-qa (server-side orchestrator)             ║
 ║   • POST /rerun (server-side orchestrator)               ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
