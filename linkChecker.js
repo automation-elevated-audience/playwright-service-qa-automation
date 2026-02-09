@@ -349,9 +349,10 @@ async function checkPageLinks(pageUrl) {
  * Check links for multiple pages in parallel
  * @param {Array} pages - Array of page objects with url and pageName
  * @param {number} concurrency - Number of pages to check concurrently
+ * @param {Function|null} onPageComplete - Optional callback(checkedCount, totalCount) called after each page finishes
  * @returns {Array} Array of results
  */
-async function checkMultiplePages(pages, concurrency = 1) {
+async function checkMultiplePages(pages, concurrency = 1, onPageComplete = null) {
   const results = [];
   
   // Process pages in batches
@@ -363,15 +364,21 @@ async function checkMultiplePages(pages, concurrency = 1) {
     const batchResults = await Promise.all(
       batch.map(async (page) => {
         const linkChecks = await checkPageLinks(page.url);
-        return {
+        const result = {
           url: page.url,
           pageName: page.pageName,
           linkChecks
         };
+        return result;
       })
     );
     
     results.push(...batchResults);
+
+    // Notify progress after each batch completes
+    if (onPageComplete) {
+      onPageComplete(results.length, pages.length);
+    }
   }
   
   return results;

@@ -14,9 +14,9 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || '';
 
-// Track active background jobs to prevent duplicate processing
-// Key: job identifier (project_id for reruns, project_name for start-qa)
-// Value: { type: 'start-qa' | 'rerun', startedAt: Date }
+// Track active background jobs to prevent duplicate processing and report progress
+// Key: job identifier (e.g. "start-qa:ProjectName" or "rerun:uuid")
+// Value: { type, stage, startedAt, totalPages, checkedPages, projectName|projectId }
 const activeJobs = new Map();
 
 // Middleware
@@ -223,8 +223,15 @@ app.post('/start-qa', async (req, res) => {
     });
   }
 
-  // Register this job as active
-  activeJobs.set(jobKey, { type: 'start-qa', startedAt: Date.now() });
+  // Register this job as active with granular progress tracking
+  activeJobs.set(jobKey, {
+    type: 'start-qa',
+    startedAt: Date.now(),
+    stage: 'checking_links',
+    totalPages: (pages || []).length,
+    checkedPages: 0,
+    projectName: project_data.project_name,
+  });
 
   // Respond immediately so the browser can navigate away safely
   res.json({ status: 'processing', project_name: project_data.project_name });
@@ -246,7 +253,17 @@ app.post('/start-qa', async (req, res) => {
           if (playwrightPages.length > 0) {
             const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
             const startTime = Date.now();
-            const linkResults = await checkMultiplePages(playwrightPages, concurrency);
+
+            // Progress callback: update activeJobs as each page batch completes
+            const onPageComplete = (checked, total) => {
+              const job = activeJobs.get(jobKey);
+              if (job) {
+                job.checkedPages = checked;
+                job.totalPages = total;
+              }
+            };
+
+            const linkResults = await checkMultiplePages(playwrightPages, concurrency, onPageComplete);
             const duration = Date.now() - startTime;
             console.log(`[START-QA] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
 
@@ -266,6 +283,9 @@ app.post('/start-qa', async (req, res) => {
       }
 
       // Step 2: Forward the start request to n8n with enriched pages
+      const job = activeJobs.get(jobKey);
+      if (job) job.stage = 'forwarding_to_n8n';
+
       const payload = {
         ...project_data,
         ...(settings || {}),
@@ -280,6 +300,10 @@ app.post('/start-qa', async (req, res) => {
       });
 
       console.log(`[START-QA] n8n responded for "${project_data.project_name}":`, n8nResponse.status);
+
+      // Mark as completed briefly before cleanup
+      const jobFinal = activeJobs.get(jobKey);
+      if (jobFinal) jobFinal.stage = 'completed';
     } catch (error) {
       console.error(`[START-QA] Background processing failed for "${project_data.project_name}":`, error.message);
     } finally {
@@ -326,8 +350,15 @@ app.post('/rerun', async (req, res) => {
     });
   }
 
-  // Register this job as active
-  activeJobs.set(jobKey, { type: 'rerun', startedAt: Date.now() });
+  // Register this job as active with granular progress tracking
+  activeJobs.set(jobKey, {
+    type: 'rerun',
+    startedAt: Date.now(),
+    stage: 'checking_links',
+    totalPages: (pages || []).length,
+    checkedPages: 0,
+    projectId: project_id,
+  });
 
   // Respond immediately so the browser can navigate away safely
   res.json({ status: 'processing', project_id });
@@ -349,7 +380,17 @@ app.post('/rerun', async (req, res) => {
           if (playwrightPages.length > 0) {
             const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
             const startTime = Date.now();
-            const linkResults = await checkMultiplePages(playwrightPages, concurrency);
+
+            // Progress callback: update activeJobs as each page batch completes
+            const onPageComplete = (checked, total) => {
+              const job = activeJobs.get(jobKey);
+              if (job) {
+                job.checkedPages = checked;
+                job.totalPages = total;
+              }
+            };
+
+            const linkResults = await checkMultiplePages(playwrightPages, concurrency, onPageComplete);
             const duration = Date.now() - startTime;
             console.log(`[RERUN] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
 
@@ -370,6 +411,9 @@ app.post('/rerun', async (req, res) => {
       }
 
       // Step 2: Forward the rerun request to n8n with link check results
+      const job = activeJobs.get(jobKey);
+      if (job) job.stage = 'forwarding_to_n8n';
+
       const payload = {
         project_id,
         ...(settings || {}),
@@ -384,6 +428,10 @@ app.post('/rerun', async (req, res) => {
       });
 
       console.log(`[RERUN] n8n responded for project ${project_id}:`, n8nResponse.status);
+
+      // Mark as completed briefly before cleanup
+      const jobFinal = activeJobs.get(jobKey);
+      if (jobFinal) jobFinal.stage = 'completed';
     } catch (error) {
       console.error(`[RERUN] Background processing failed for project ${project_id}:`, error.message);
     } finally {
@@ -391,6 +439,65 @@ app.post('/rerun', async (req, res) => {
       console.log(`[RERUN] Job removed from activeJobs: project ${project_id}`);
     }
   })();
+});
+
+// ============================================================
+// Job status endpoint for frontend polling
+// Returns real-time progress of active background jobs
+// ============================================================
+app.get('/job-status', (req, res) => {
+  const { project_name, project_id } = req.query;
+
+  if (!project_name && !project_id) {
+    return res.status(400).json({
+      error: 'Invalid request',
+      message: 'Provide project_name or project_id as a query parameter'
+    });
+  }
+
+  // Look up by start-qa key first, then rerun key
+  let jobKey = null;
+  let job = null;
+
+  if (project_name) {
+    jobKey = `start-qa:${project_name}`;
+    job = activeJobs.get(jobKey);
+  }
+
+  if (!job && project_id) {
+    jobKey = `rerun:${project_id}`;
+    job = activeJobs.get(jobKey);
+  }
+
+  // Also check the reverse: if project_name was given, maybe there's a rerun for it
+  // (unlikely but handle gracefully)
+  if (!job && project_name) {
+    // Scan activeJobs for a matching projectName in rerun entries
+    for (const [key, value] of activeJobs) {
+      if (value.projectName === project_name) {
+        job = value;
+        break;
+      }
+    }
+  }
+
+  if (!job) {
+    return res.json({ found: false });
+  }
+
+  const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+
+  res.json({
+    found: true,
+    type: job.type,
+    stage: job.stage,
+    totalPages: job.totalPages,
+    checkedPages: job.checkedPages,
+    startedAt: job.startedAt,
+    elapsed_seconds: elapsed,
+    projectName: job.projectName || null,
+    projectId: job.projectId || null,
+  });
 });
 
 // Error handling middleware
@@ -423,6 +530,7 @@ const server = app.listen(PORT, () => {
 ║                                                           ║
 ║   Endpoints:                                             ║
 ║   • GET  /health                                         ║
+║   • GET  /job-status (real-time progress)                ║
 ║   • POST /check-links                                    ║
 ║   • POST /fetch-page                                     ║
 ║   • POST /screenshot                                     ║
