@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const axios = require('axios');
 const { checkMultiplePages } = require('./linkChecker');
 const { fetchPage } = require('./pageFetcher');
 const { captureScreenshot } = require('./screenshotHandler');
@@ -11,6 +12,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL || '';
 
 // Middleware
 app.use(cors());
@@ -179,6 +181,90 @@ app.post('/check-content', async (req, res) => {
   }
 });
 
+// ============================================================
+// Server-side rerun orchestrator
+// Responds immediately, then runs link checks + forwards to n8n in the background
+// This ensures the process survives browser refresh/navigation/close
+// ============================================================
+app.post('/rerun', async (req, res) => {
+  const { project_id, pages, settings, n8n_webhook_url } = req.body;
+
+  if (!project_id) {
+    return res.status(400).json({
+      error: 'Invalid request',
+      message: 'project_id is required'
+    });
+  }
+
+  const webhookUrl = n8n_webhook_url || N8N_WEBHOOK_URL;
+  if (!webhookUrl) {
+    return res.status(400).json({
+      error: 'Configuration error',
+      message: 'n8n webhook URL is not configured. Set N8N_WEBHOOK_URL in .env or pass n8n_webhook_url in the request body.'
+    });
+  }
+
+  // Respond immediately so the browser can navigate away safely
+  res.json({ status: 'processing', project_id });
+
+  // Background processing - runs after response is sent
+  (async () => {
+    try {
+      console.log(`[RERUN] Starting server-side rerun for project ${project_id} with ${(pages || []).length} pages`);
+
+      // Step 1: Run Playwright link checks on the provided pages
+      let pagesWithLinkChecks = [];
+      if (pages && pages.length > 0) {
+        try {
+          const playwrightPages = pages.map(p => ({
+            url: p.page_url || p.pageUrl,
+            pageName: p.page_name || p.pageName || 'Page'
+          })).filter(p => p.url);
+
+          if (playwrightPages.length > 0) {
+            const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
+            const startTime = Date.now();
+            const linkResults = await checkMultiplePages(playwrightPages, concurrency);
+            const duration = Date.now() - startTime;
+            console.log(`[RERUN] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
+
+            // Map link check results back to pages
+            pagesWithLinkChecks = pages.map(p => {
+              const pageUrl = (p.page_url || p.pageUrl || '').replace(/\/+$/, '');
+              const lr = linkResults.find(l => (l.url || '').replace(/\/+$/, '') === pageUrl);
+              return {
+                page_url: p.page_url || p.pageUrl,
+                page_name: p.page_name || p.pageName || 'Page',
+                link_checks: lr?.linkChecks || null
+              };
+            }).filter(p => p.link_checks != null);
+          }
+        } catch (linkError) {
+          console.warn(`[RERUN] Link check failed, continuing without:`, linkError.message);
+        }
+      }
+
+      // Step 2: Forward the rerun request to n8n with link check results
+      const payload = {
+        project_id,
+        ...(settings || {}),
+        pages: pagesWithLinkChecks
+      };
+
+      console.log(`[RERUN] Forwarding to n8n: ${webhookUrl}/qa/rerun with ${pagesWithLinkChecks.length} pages with link_checks`);
+
+      const n8nResponse = await axios.post(`${webhookUrl}/qa/rerun`, payload, {
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      console.log(`[RERUN] n8n responded for project ${project_id}:`, n8nResponse.status);
+    } catch (error) {
+      console.error(`[RERUN] Background processing failed for project ${project_id}:`, error.message);
+    }
+  })();
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('[SERVER] Unhandled error:', err);
@@ -213,6 +299,7 @@ const server = app.listen(PORT, () => {
 ║   • POST /fetch-page                                     ║
 ║   • POST /screenshot                                     ║
 ║   • POST /check-content                                  ║
+║   • POST /rerun (server-side orchestrator)               ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 });
