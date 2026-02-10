@@ -125,8 +125,47 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
       // Some sites never reach networkidle due to analytics/ads -- that's fine
     }
 
-    // Extra buffer for lazy-loaded images and JS-rendered content
-    await page.waitForTimeout(15000);
+    // Remove lazy loading so all images load eagerly
+    await page.evaluate(() => {
+      document.querySelectorAll('img[loading="lazy"]').forEach(img => {
+        img.removeAttribute('loading');
+        img.loading = 'eager';
+      });
+    });
+
+    // Scroll through the full page to trigger intersection-observer-based lazy loaders
+    await page.evaluate(async () => {
+      await new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = 500;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+          if (totalHeight >= scrollHeight) {
+            clearInterval(timer);
+            window.scrollTo(0, 0);
+            resolve();
+          }
+        }, 100);
+      });
+    });
+
+    // Wait for all images to fully load
+    await page.evaluate(async () => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      await Promise.all(imgs.map(img => {
+        if (img.complete && img.naturalHeight > 0) return;
+        return new Promise(resolve => {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+          setTimeout(resolve, 10000);
+        });
+      }));
+    });
+
+    // Small buffer for CSS background images / animations
+    await page.waitForTimeout(2000);
 
     // Capture the full page screenshot
     const rawBuffer = await page.screenshot({
