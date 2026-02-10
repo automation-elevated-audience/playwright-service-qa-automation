@@ -111,15 +111,22 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
 
     const page = await context.newPage();
 
-    // Use 'load' instead of 'networkidle' for screenshots - more reliable
-    // networkidle can timeout on sites with analytics/ads that never stop making requests
+    // Use 'load' for initial navigation, then wait for network to settle
     const navTimeout = parseInt(process.env.REQUEST_TIMEOUT, 10) || 180000;
     await page.goto(url, {
       waitUntil: 'load',
       timeout: navTimeout
     });
 
-    await page.waitForTimeout(2000);
+    // Wait for network to settle (images, fonts, lazy content)
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 15000 });
+    } catch {
+      // Some sites never reach networkidle due to analytics/ads -- that's fine
+    }
+
+    // Extra buffer for lazy-loaded images and JS-rendered content
+    await page.waitForTimeout(15000);
 
     // Capture the full page screenshot
     const rawBuffer = await page.screenshot({
