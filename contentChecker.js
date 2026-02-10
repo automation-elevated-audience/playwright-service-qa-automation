@@ -243,29 +243,46 @@ function extractKeyPhrases(text) {
 }
 
 /**
- * Calculate similarity between two strings using Levenshtein-based approach
- * @param {string} str1 
- * @param {string} str2 
- * @returns {number} Similarity score 0-100
+ * Calculate similarity between two strings with detailed word breakdown
+ * @param {string} str1 - Expected content
+ * @param {string} str2 - Actual content
+ * @returns {Object} Detailed similarity breakdown
  */
 function calculateSimilarity(str1, str2) {
   const s1 = normalizeText(str1);
   const s2 = normalizeText(str2);
   
-  if (!s1 || !s2) return 0;
-  if (s1 === s2) return 100;
+  const emptyResult = { matchPercentage: 0, matchedWords: [], unmatchedWords: [], extraWords: [], matchedWordCount: 0 };
   
-  // Word-based comparison for better accuracy on long text
-  const words1 = s1.split(' ').filter(w => w.length > 2);
-  const words2 = s2.split(' ').filter(w => w.length > 2);
+  if (!s1 || !s2) return emptyResult;
+  if (s1 === s2) {
+    const allWords = [...new Set(s1.split(' ').filter(w => w.length > 2))];
+    return { matchPercentage: 100, matchedWords: allWords, unmatchedWords: [], extraWords: [], matchedWordCount: allWords.length };
+  }
   
-  if (words1.length === 0 || words2.length === 0) return 0;
+  // Word-based comparison using sets for accurate unique-word matching
+  const words1 = s1.split(' ').filter(w => w.length > 2); // expected
+  const words2 = s2.split(' ').filter(w => w.length > 2); // actual
   
-  // Count matching words
-  const matchingWords = words1.filter(w => words2.includes(w));
-  const totalUniqueWords = new Set([...words1, ...words2]).size;
+  const expectedSet = new Set(words1);
+  const actualSet = new Set(words2);
   
-  return Math.round((matchingWords.length / totalUniqueWords) * 100);
+  if (expectedSet.size === 0 || actualSet.size === 0) return emptyResult;
+  
+  const matchedWords = [...expectedSet].filter(w => actualSet.has(w));
+  const unmatchedWords = [...expectedSet].filter(w => !actualSet.has(w));
+  const extraWords = [...actualSet].filter(w => !expectedSet.has(w));
+  
+  // Percentage = how many expected words were found (capped at 100)
+  const matchPercentage = Math.min(Math.round((matchedWords.length / expectedSet.size) * 100), 100);
+  
+  return {
+    matchPercentage,
+    matchedWords,
+    unmatchedWords,
+    extraWords,
+    matchedWordCount: matchedWords.length
+  };
 }
 
 /**
@@ -294,6 +311,34 @@ function findMissingPhrases(expectedContent, actualContent) {
   }
   
   return missing.slice(0, 10); // Limit to 10 missing phrases
+}
+
+/**
+ * Find which expected phrases ARE present in actual content
+ * @param {string} expectedContent 
+ * @param {string} actualContent 
+ * @returns {string[]} Array of matched phrases
+ */
+function findMatchedPhrases(expectedContent, actualContent) {
+  const expectedPhrases = extractKeyPhrases(expectedContent);
+  const normalizedActual = normalizeText(actualContent);
+  
+  const matched = [];
+  
+  for (const phrase of expectedPhrases) {
+    const normalizedPhrase = normalizeText(phrase);
+    
+    // Check if phrase exists in actual content (with some fuzzy matching)
+    const words = normalizedPhrase.split(' ').filter(w => w.length > 3);
+    const matchingWords = words.filter(w => normalizedActual.includes(w));
+    
+    // If 60% or more of words match, consider phrase matched
+    if (words.length > 0 && (matchingWords.length / words.length) >= 0.6) {
+      matched.push(phrase);
+    }
+  }
+  
+  return matched.slice(0, 15); // Limit to 15 matched phrases
 }
 
 /**
@@ -421,8 +466,9 @@ async function checkPageContent(pageUrl, expectedContent, contentDocLink = null)
     await browser.close();
     
     // Calculate metrics
-    const matchPercentage = calculateSimilarity(expectedContentFinal, actualContent);
+    const similarity = calculateSimilarity(expectedContentFinal, actualContent);
     const missingPhrases = findMissingPhrases(expectedContentFinal, actualContent);
+    const matchedPhrases = findMatchedPhrases(expectedContentFinal, actualContent);
     const wordCountExpected = expectedContentFinal.split(/\s+/).filter(w => w.length > 0).length;
     const wordCountActual = actualContent.split(/\s+/).filter(w => w.length > 0).length;
     
@@ -430,12 +476,12 @@ async function checkPageContent(pageUrl, expectedContent, contentDocLink = null)
     let status = 'PASS';
     let issue = null;
     
-    if (matchPercentage < 50) {
+    if (similarity.matchPercentage < 50) {
       status = 'FAIL';
-      issue = `Content match is only ${matchPercentage}% - significant content differences detected`;
-    } else if (matchPercentage < 75) {
+      issue = `Content match is only ${similarity.matchPercentage}% - significant content differences detected`;
+    } else if (similarity.matchPercentage < 75) {
       status = 'WARNING';
-      issue = `Content match is ${matchPercentage}% - some expected content may be missing`;
+      issue = `Content match is ${similarity.matchPercentage}% - some expected content may be missing`;
     }
     
     if (missingPhrases.length > 5) {
@@ -446,20 +492,36 @@ async function checkPageContent(pageUrl, expectedContent, contentDocLink = null)
       issue = `${missingPhrases.length} key phrase(s) may be missing from page`;
     }
     
+    // Build human-readable summary
+    const expectedUniqueCount = new Set(normalizeText(expectedContentFinal).split(' ').filter(w => w.length > 2)).size;
+    const summary = `${similarity.matchedWordCount} of ${expectedUniqueCount} expected unique words found on page`;
+    
     console.log(`[CONTENT] Results for ${pageUrl}:`, {
       status,
-      matchPercentage,
+      matchPercentage: similarity.matchPercentage,
+      matchedWordCount: similarity.matchedWordCount,
+      unmatchedWordCount: similarity.unmatchedWords.length,
+      extraWordCount: similarity.extraWords.length,
+      matchedPhrasesCount: matchedPhrases.length,
       missingPhrasesCount: missingPhrases.length
     });
     
     return {
       status,
       issue,
-      matchPercentage,
+      matchPercentage: similarity.matchPercentage,
+      matchedWordCount: similarity.matchedWordCount,
+      matchedWords: similarity.matchedWords.slice(0, 50),
+      unmatchedWords: similarity.unmatchedWords.slice(0, 30),
+      extraWords: similarity.extraWords.slice(0, 30),
+      matchedPhrases,
       missingPhrases,
       wordCountExpected,
       wordCountActual,
-      contentChecked: true
+      contentChecked: true,
+      summary,
+      expectedContentPreview: expectedContentFinal.substring(0, 300),
+      actualContentPreview: actualContent.substring(0, 300)
     };
     
   } catch (error) {
@@ -487,5 +549,6 @@ module.exports = {
   normalizeText,
   calculateSimilarity,
   findMissingPhrases,
+  findMatchedPhrases,
   extractKeyPhrases
 };
