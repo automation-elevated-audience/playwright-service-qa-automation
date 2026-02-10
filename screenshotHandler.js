@@ -125,7 +125,19 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
       // Some sites never reach networkidle due to analytics/ads -- that's fine
     }
 
-    // Remove lazy loading so all images load eagerly
+    // --- Step 1: Remove lazy-load classes (Bricks Builder, WordPress, generic) ---
+    await page.evaluate(() => {
+      // Bricks Builder: remove bricks-lazy-hidden from all elements
+      document.querySelectorAll('.bricks-lazy-hidden').forEach(el => {
+        el.classList.remove('bricks-lazy-hidden');
+      });
+      // Generic WordPress lazy classes
+      document.querySelectorAll('.lazyload, .lazy, .wp-image-lazy').forEach(el => {
+        el.classList.remove('lazyload', 'lazy', 'wp-image-lazy');
+      });
+    });
+
+    // --- Step 2: Remove loading="lazy" from <img> tags ---
     await page.evaluate(() => {
       document.querySelectorAll('img[loading="lazy"]').forEach(img => {
         img.removeAttribute('loading');
@@ -133,11 +145,29 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
       });
     });
 
-    // Scroll through the full page to trigger intersection-observer-based lazy loaders
+    // --- Step 3: Swap data-src / data-lazy-src to src for lazy-loaded images ---
+    await page.evaluate(() => {
+      document.querySelectorAll('img[data-src], img[data-lazy-src]').forEach(img => {
+        const realSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+        if (realSrc) {
+          img.src = realSrc;
+        }
+      });
+      // Also handle <source> elements with data-srcset
+      document.querySelectorAll('source[data-srcset]').forEach(source => {
+        source.srcset = source.getAttribute('data-srcset');
+      });
+      // Handle data-bg for elements using background images via lazy loaders
+      document.querySelectorAll('[data-bg]').forEach(el => {
+        el.style.backgroundImage = 'url(' + el.getAttribute('data-bg') + ')';
+      });
+    });
+
+    // --- Step 4: Scroll through the full page to trigger any remaining lazy loaders ---
     await page.evaluate(async () => {
       await new Promise((resolve) => {
         let totalHeight = 0;
-        const distance = 500;
+        const distance = 300;
         const timer = setInterval(() => {
           const scrollHeight = document.body.scrollHeight;
           window.scrollBy(0, distance);
@@ -147,11 +177,11 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
             window.scrollTo(0, 0);
             resolve();
           }
-        }, 100);
+        }, 150);
       });
     });
 
-    // Wait for all images to fully load
+    // --- Step 5: Wait for all <img> elements to fully load ---
     await page.evaluate(async () => {
       const imgs = Array.from(document.querySelectorAll('img'));
       await Promise.all(imgs.map(img => {
@@ -164,7 +194,42 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
       }));
     });
 
-    // Small buffer for CSS background images / animations
+    // --- Step 6: Preload all CSS background images ---
+    await page.evaluate(async () => {
+      const bgUrls = new Set();
+      document.querySelectorAll('*').forEach(el => {
+        const bg = getComputedStyle(el).backgroundImage;
+        if (bg && bg !== 'none') {
+          const matches = bg.match(/url\(["']?([^"')]+)["']?\)/g);
+          if (matches) {
+            matches.forEach(m => {
+              const url = m.replace(/url\(["']?|["']?\)/g, '');
+              if (url && !url.startsWith('data:')) bgUrls.add(url);
+            });
+          }
+        }
+      });
+      if (bgUrls.size > 0) {
+        await Promise.all([...bgUrls].map(url =>
+          new Promise(resolve => {
+            const img = new Image();
+            img.onload = resolve;
+            img.onerror = resolve;
+            img.src = url;
+            setTimeout(resolve, 10000);
+          })
+        ));
+      }
+    });
+
+    // --- Step 7: Second networkidle wait for newly triggered downloads ---
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+    } catch {
+      // Fine if it doesn't settle
+    }
+
+    // Small buffer for final rendering / animations
     await page.waitForTimeout(2000);
 
     // Capture the full page screenshot
