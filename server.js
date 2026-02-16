@@ -597,6 +597,46 @@ app.get('/job-status', async (req, res) => {
   });
 });
 
+// Cancel active job
+app.post('/cancel-job', async (req, res) => {
+  console.log('[CANCEL-JOB] Request received');
+  
+  try {
+    // Clear all active jobs from memory
+    const jobCount = activeJobs.size;
+    activeJobs.clear();
+    console.log(`[CANCEL-JOB] Cleared ${jobCount} active jobs from memory`);
+    
+    // Reset any in_progress or processing pages to pending in database
+    if (supabase) {
+      const { data, error } = await supabase
+        .from('pages')
+        .update({ status: 'pending' })
+        .in('status', ['in_progress', 'processing'])
+        .select();
+      
+      if (error) {
+        console.error('[CANCEL-JOB] Database update error:', error);
+      } else {
+        console.log(`[CANCEL-JOB] Reset ${data?.length || 0} pages to pending`);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Active jobs cancelled',
+      clearedJobs: jobCount
+    });
+  } catch (error) {
+    console.error('[CANCEL-JOB] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to cancel job',
+      message: error.message
+    });
+  }
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('[SERVER] Unhandled error:', err);
