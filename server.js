@@ -107,8 +107,9 @@ app.post('/check-links', async (req, res) => {
       console.log(`[SERVER] Warning: ${pages.length - validPages.length} invalid pages filtered out`);
     }
     
-    // Get concurrency from query params or use default
-    const concurrency = parseInt(req.query.concurrency) || parseInt(process.env.MAX_CONCURRENCY) || 1;
+    // Get concurrency from request body settings, query params, or env default
+    const concurrency = parseInt(req.body.concurrency) || parseInt(req.query.concurrency) || parseInt(process.env.MAX_CONCURRENCY) || 5;
+    console.log(`[SERVER] Using concurrency: ${concurrency}`);
     
     // Check links for all pages
     const startTime = Date.now();
@@ -322,7 +323,8 @@ app.post('/start-qa', async (req, res) => {
           })).filter(p => p.url);
 
           if (playwrightPages.length > 0) {
-            const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
+            const concurrency = parseInt(settings?.concurrency) || parseInt(process.env.MAX_CONCURRENCY) || 5;
+            console.log(`[START-QA] Using concurrency: ${concurrency}`);
             const startTime = Date.now();
 
             // Progress callback: update activeJobs as each page batch completes
@@ -336,7 +338,7 @@ app.post('/start-qa', async (req, res) => {
 
             const linkResults = await checkMultiplePages(playwrightPages, concurrency, onPageComplete);
             const duration = Date.now() - startTime;
-            console.log(`[START-QA] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
+            console.log(`[START-QA] Link checks completed for ${linkResults.length} pages in ${duration}ms (concurrency=${concurrency})`);
 
             // Enrich pages with link check results
             pagesWithLinkChecks = pages.map(p => {
@@ -460,7 +462,8 @@ app.post('/rerun', async (req, res) => {
           })).filter(p => p.url);
 
           if (playwrightPages.length > 0) {
-            const concurrency = parseInt(process.env.MAX_CONCURRENCY) || 1;
+            const concurrency = parseInt(settings?.concurrency) || parseInt(process.env.MAX_CONCURRENCY) || 5;
+            console.log(`[RERUN] Using concurrency: ${concurrency}`);
             const startTime = Date.now();
 
             // Progress callback: update activeJobs as each page batch completes
@@ -474,7 +477,7 @@ app.post('/rerun', async (req, res) => {
 
             const linkResults = await checkMultiplePages(playwrightPages, concurrency, onPageComplete);
             const duration = Date.now() - startTime;
-            console.log(`[RERUN] Link checks completed for ${linkResults.length} pages in ${duration}ms`);
+            console.log(`[RERUN] Link checks completed for ${linkResults.length} pages in ${duration}ms (concurrency=${concurrency})`);
 
             // Map link check results back to pages
             pagesWithLinkChecks = pages.map(p => {
