@@ -246,7 +246,7 @@ app.post('/fetch-page', async (req, res) => {
   }
 });
 
-// Capture screenshot (returns raw image bytes)
+// Capture screenshot (returns base64 JSON for n8n compatibility)
 app.post('/screenshot', async (req, res) => {
   try {
     const { url, viewport = 'desktop', fullPage = true, quality = 70 } = req.body;
@@ -262,13 +262,18 @@ app.post('/screenshot', async (req, res) => {
     const viewportType = validViewports.includes(viewport) ? viewport : 'desktop';
 
     const buffer = await captureScreenshot(url, viewportType, fullPage, quality);
-    res.set('Content-Type', 'image/jpeg');
-    res.send(buffer);
+    res.json({
+      success: true,
+      base64: buffer.toString('base64'),
+      mimeType: 'image/jpeg',
+      viewport: viewportType,
+      size: buffer.length
+    });
   } catch (error) {
     console.error('[SERVER] Error capturing screenshot:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error',
+      error: 'Screenshot failed',
       message: error.message
     });
   }
