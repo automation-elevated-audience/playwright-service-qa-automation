@@ -59,6 +59,88 @@ async function isN8nBusy() {
 // Value: { type, stage, startedAt, totalPages, checkedPages, projectName|projectId }
 const activeJobs = new Map();
 
+// ============================================================
+// Stale page watchdog — auto-recover pages stuck in processing
+// ============================================================
+const STALE_PAGE_TIMEOUT_MS = parseInt(process.env.STALE_PAGE_TIMEOUT_MS) || 15 * 60 * 1000; // 15 min default
+const WATCHDOG_INTERVAL_MS = 2 * 60 * 1000; // Check every 2 minutes
+
+async function recoverStalePages() {
+  if (!supabase) return;
+  try {
+    const cutoff = new Date(Date.now() - STALE_PAGE_TIMEOUT_MS).toISOString();
+    const { data, error } = await supabase
+      .from('pages')
+      .update({ status: 'failed', updated_at: new Date().toISOString() })
+      .in('status', ['in_progress', 'processing'])
+      .lt('updated_at', cutoff)
+      .select('id, page_name, project_id');
+
+    if (error) {
+      console.warn('[WATCHDOG] Supabase update error:', error.message);
+      return;
+    }
+    if (data && data.length > 0) {
+      const projectIds = [...new Set(data.map(p => p.project_id))];
+      console.log(`[WATCHDOG] Recovered ${data.length} stale page(s) across ${projectIds.length} project(s):`,
+        data.map(p => p.page_name).join(', '));
+    }
+  } catch (err) {
+    console.warn('[WATCHDOG] Exception during stale page recovery:', err.message);
+  }
+}
+
+setInterval(recoverStalePages, WATCHDOG_INTERVAL_MS);
+// Also run once on startup after a short delay (catches pages stuck from a previous crash)
+setTimeout(recoverStalePages, 30 * 1000);
+
+// ============================================================
+// Retry helper for n8n webhook calls
+// ============================================================
+async function postToN8nWithRetry(url, payload, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await axios.post(url, payload, {
+        timeout: 60000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (err) {
+      console.error(`[N8N-RETRY] Attempt ${attempt}/${maxRetries} failed for ${url}: ${err.message}`);
+      if (attempt === maxRetries) throw err;
+      const delay = [5000, 15000, 30000][attempt - 1] || 30000;
+      console.log(`[N8N-RETRY] Waiting ${delay / 1000}s before retry...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+/**
+ * Mark pages as failed in Supabase when n8n forwarding fails entirely.
+ * Prevents pages from being stuck in processing forever.
+ */
+async function markPagesAsFailed(pages, context) {
+  if (!supabase || !pages || pages.length === 0) return;
+  try {
+    const pageUrls = pages.map(p => p.page_url || p.pageUrl).filter(Boolean);
+    if (pageUrls.length === 0) return;
+
+    const { data, error } = await supabase
+      .from('pages')
+      .update({ status: 'failed', updated_at: new Date().toISOString() })
+      .in('page_url', pageUrls)
+      .in('status', ['pending', 'in_progress', 'processing'])
+      .select('id, page_name');
+
+    if (error) {
+      console.error(`[${context}] Failed to mark pages as failed in DB:`, error.message);
+    } else if (data?.length > 0) {
+      console.log(`[${context}] Marked ${data.length} page(s) as failed:`, data.map(p => p.page_name).join(', '));
+    }
+  } catch (err) {
+    console.error(`[${context}] Exception marking pages as failed:`, err.message);
+  }
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -367,10 +449,7 @@ app.post('/start-qa', async (req, res) => {
 
       console.log(`[START-QA] Forwarding to n8n: ${webhookUrl}/qa/start with ${pagesWithLinkChecks.length} pages`);
 
-      const n8nResponse = await axios.post(`${webhookUrl}/qa/start`, payload, {
-        timeout: 60000,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      const n8nResponse = await postToN8nWithRetry(`${webhookUrl}/qa/start`, payload);
 
       console.log(`[START-QA] n8n responded for "${project_data.project_name}":`, n8nResponse.status);
 
@@ -379,6 +458,7 @@ app.post('/start-qa', async (req, res) => {
       if (jobFinal) jobFinal.stage = 'completed';
     } catch (error) {
       console.error(`[START-QA] Background processing failed for "${project_data.project_name}":`, error.message);
+      await markPagesAsFailed(pages, 'START-QA');
     } finally {
       activeJobs.delete(jobKey);
       console.log(`[START-QA] Job removed from activeJobs: "${project_data.project_name}"`);
@@ -507,10 +587,7 @@ app.post('/rerun', async (req, res) => {
 
       console.log(`[RERUN] Forwarding to n8n: ${webhookUrl}/qa/rerun with ${pagesWithLinkChecks.length} pages with link_checks`);
 
-      const n8nResponse = await axios.post(`${webhookUrl}/qa/rerun`, payload, {
-        timeout: 60000,
-        headers: { 'Content-Type': 'application/json' }
-      });
+      const n8nResponse = await postToN8nWithRetry(`${webhookUrl}/qa/rerun`, payload);
 
       console.log(`[RERUN] n8n responded for project ${project_id}:`, n8nResponse.status);
 
@@ -519,6 +596,7 @@ app.post('/rerun', async (req, res) => {
       if (jobFinal) jobFinal.stage = 'completed';
     } catch (error) {
       console.error(`[RERUN] Background processing failed for project ${project_id}:`, error.message);
+      await markPagesAsFailed(pages, 'RERUN');
     } finally {
       activeJobs.delete(jobKey);
       console.log(`[RERUN] Job removed from activeJobs: project ${project_id}`);
