@@ -262,20 +262,22 @@ app.post('/screenshot', async (req, res) => {
     const viewportType = validViewports.includes(viewport) ? viewport : 'desktop';
 
     if (includeViewport && viewportType === 'mobile') {
-      const { fullPage: fullPageBuf, viewport: viewportBuf } = await captureWithViewport(url, quality);
+      const { fullPage: fullPageBuf, viewport: viewportBuf, responsivenessChecks } = await captureWithViewport(url, quality);
       return res.json({
         base64: fullPageBuf.toString('base64'),
-        viewportBase64: viewportBuf.toString('base64')
+        viewportBase64: viewportBuf.toString('base64'),
+        responsivenessChecks: responsivenessChecks || null
       });
     }
 
-    const buffer = await captureScreenshot(url, viewportType, fullPage, quality);
+    const { buffer, responsivenessChecks } = await captureScreenshot(url, viewportType, fullPage, quality);
     res.json({
       success: true,
       base64: buffer.toString('base64'),
       mimeType: 'image/jpeg',
       viewport: viewportType,
-      size: buffer.length
+      size: buffer.length,
+      responsivenessChecks: responsivenessChecks || null
     });
   } catch (error) {
     console.error('[SERVER] Error capturing screenshot:', error);

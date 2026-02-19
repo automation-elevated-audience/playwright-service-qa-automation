@@ -211,12 +211,138 @@ async function preparePage(url, dimensions) {
 }
 
 /**
+ * Run programmatic responsiveness checks on the currently open page.
+ * Must be called while the browser is still open at the target viewport.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<{status: string, issues: string[], details: object}>}
+ */
+async function runResponsivenessChecks(page) {
+  try {
+    const result = await page.evaluate(() => {
+      const vw = document.documentElement.clientWidth;
+      const vh = document.documentElement.clientHeight;
+      const issues = [];
+
+      // 1. Horizontal overflow
+      const hasHorizontalScroll = document.body.scrollWidth > vw + 2;
+      if (hasHorizontalScroll) {
+        issues.push(`Horizontal overflow detected (content ${document.body.scrollWidth}px vs viewport ${vw}px)`);
+      }
+
+      // 2. Elements overflowing viewport
+      let overflowingElements = 0;
+      const skipTags = new Set(['SCRIPT', 'STYLE', 'META', 'LINK', 'HEAD', 'BR', 'HR']);
+      document.querySelectorAll('body *').forEach(el => {
+        if (skipTags.has(el.tagName)) return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.right > vw + 5) {
+          overflowingElements++;
+        }
+      });
+      if (overflowingElements > 0) {
+        issues.push(`${overflowingElements} element(s) overflow the viewport boundary`);
+      }
+
+      // 3. Touch targets too small (relevant for all viewports but especially mobile/tablet)
+      let smallTouchTargets = 0;
+      document.querySelectorAll('a, button, input, select, textarea, [role="button"], [onclick]').forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && (rect.width < 44 || rect.height < 44)) {
+          const style = getComputedStyle(el);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            smallTouchTargets++;
+          }
+        }
+      });
+      if (smallTouchTargets > 0) {
+        issues.push(`${smallTouchTargets} interactive element(s) smaller than 44x44px minimum touch target`);
+      }
+
+      // 4. Body font size check
+      const bodyFontSize = parseFloat(getComputedStyle(document.body).fontSize) || 16;
+
+      // 5. Viewport meta tag
+      const viewportMeta = document.querySelector('meta[name="viewport"]');
+      const hasViewportMeta = !!viewportMeta;
+      const viewportContent = viewportMeta?.getAttribute('content') || '';
+      if (!hasViewportMeta) {
+        issues.push('Missing <meta name="viewport"> tag');
+      } else if (!viewportContent.includes('width=device-width')) {
+        issues.push('Viewport meta tag missing width=device-width');
+      }
+
+      // 6. Oversized images (naturalWidth much larger than displayed, wasting bandwidth)
+      let oversizedImages = 0;
+      document.querySelectorAll('img').forEach(img => {
+        if (img.naturalWidth > 0 && img.clientWidth > 0 && img.naturalWidth > img.clientWidth * 3) {
+          oversizedImages++;
+        }
+      });
+      if (oversizedImages > 0) {
+        issues.push(`${oversizedImages} image(s) significantly larger than display size (unoptimized)`);
+      }
+
+      // 7. Fixed/sticky elements overlapping content
+      let fixedOverlap = false;
+      const fixedEls = [];
+      document.querySelectorAll('*').forEach(el => {
+        const style = getComputedStyle(el);
+        if ((style.position === 'fixed' || style.position === 'sticky') && el.tagName !== 'SCRIPT') {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 50 && rect.top < vh / 2) {
+            fixedEls.push(rect);
+          }
+        }
+      });
+      if (fixedEls.length > 0) {
+        const mainContent = document.querySelector('main, [role="main"], #content, .content, article');
+        if (mainContent) {
+          const mainRect = mainContent.getBoundingClientRect();
+          for (const fixedRect of fixedEls) {
+            if (fixedRect.bottom > mainRect.top && fixedRect.bottom - mainRect.top > 20) {
+              fixedOverlap = true;
+              break;
+            }
+          }
+        }
+      }
+      if (fixedOverlap) {
+        issues.push('Fixed/sticky header appears to overlap page content');
+      }
+
+      return {
+        status: issues.length === 0 ? 'PASS' : 'FAIL',
+        issues,
+        details: {
+          viewportWidth: vw,
+          viewportHeight: vh,
+          hasHorizontalScroll,
+          overflowingElements,
+          smallTouchTargets,
+          bodyFontSize,
+          hasViewportMeta,
+          viewportContent,
+          oversizedImages,
+          fixedOverlap,
+        }
+      };
+    });
+
+    console.log(`[RESPONSIVENESS] ${result.status} — ${result.issues.length} issue(s) found`);
+    return result;
+  } catch (err) {
+    console.warn(`[RESPONSIVENESS] Check failed:`, err.message);
+    return { status: 'ERROR', issues: [`Check failed: ${err.message}`], details: {} };
+  }
+}
+
+/**
  * Capture a screenshot with the specified viewport
  * @param {string} url - The URL to capture
  * @param {string} viewport - 'desktop' | 'tablet' | 'mobile'
  * @param {boolean} fullPage - Whether to capture full page (default: true)
  * @param {number} quality - JPEG quality 0-100 (default: 70)
- * @returns {Promise<Buffer>} Raw JPEG image bytes (resized if needed)
+ * @returns {Promise<{buffer: Buffer, responsivenessChecks: object}>}
  */
 async function captureScreenshot(url, viewport = 'desktop', fullPage = true, quality = 70) {
   const dimensions = VIEWPORTS[viewport] || VIEWPORTS.desktop;
@@ -233,6 +359,8 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
       quality: Math.min(100, Math.max(0, quality))
     });
 
+    const responsivenessChecks = await runResponsivenessChecks(prepared.page);
+
     await browser.close();
     browser = null;
 
@@ -242,7 +370,7 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
     const buffer = Buffer.isBuffer(finalBuffer) ? finalBuffer : Buffer.from(finalBuffer);
 
     console.log(`[PLAYWRIGHT] Final screenshot: ${buffer.length} bytes`);
-    return buffer;
+    return { buffer, responsivenessChecks };
   } catch (error) {
     console.error(`[PLAYWRIGHT] Error capturing screenshot ${viewport} for ${url}:`, error.message);
     if (browser) await browser.close();
@@ -255,7 +383,7 @@ async function captureScreenshot(url, viewport = 'desktop', fullPage = true, qua
  * The viewport-only shot (375x667) gives Claude a clear view of the header/hamburger icon.
  * @param {string} url - The URL to capture
  * @param {number} quality - JPEG quality 0-100 (default: 70)
- * @returns {Promise<{fullPage: Buffer, viewport: Buffer}>}
+ * @returns {Promise<{fullPage: Buffer, viewport: Buffer, responsivenessChecks: object}>}
  */
 async function captureWithViewport(url, quality = 70) {
   const dimensions = VIEWPORTS.mobile;
@@ -282,18 +410,20 @@ async function captureWithViewport(url, quality = 70) {
       quality: jpegQuality
     });
 
+    const responsivenessChecks = await runResponsivenessChecks(prepared.page);
+
     await browser.close();
     browser = null;
 
     console.log(`[PLAYWRIGHT] Viewport screenshot: ${viewportRaw.length} bytes, Full-page: ${fullPageRaw.length} bytes`);
 
     const fullPageBuffer = await resizeIfNeeded(fullPageRaw, quality);
-    // Viewport screenshot is always 375x667 so no resize needed, but run it for safety
     const viewportBuffer = await resizeIfNeeded(viewportRaw, quality);
 
     return {
       fullPage: Buffer.isBuffer(fullPageBuffer) ? fullPageBuffer : Buffer.from(fullPageBuffer),
-      viewport: Buffer.isBuffer(viewportBuffer) ? viewportBuffer : Buffer.from(viewportBuffer)
+      viewport: Buffer.isBuffer(viewportBuffer) ? viewportBuffer : Buffer.from(viewportBuffer),
+      responsivenessChecks
     };
   } catch (error) {
     console.error(`[PLAYWRIGHT] Error capturing dual screenshot for ${url}:`, error.message);
@@ -305,6 +435,7 @@ async function captureWithViewport(url, quality = 70) {
 module.exports = {
   captureScreenshot,
   captureWithViewport,
+  runResponsivenessChecks,
   resizeIfNeeded,
   VIEWPORTS,
   MAX_IMAGE_DIMENSION
