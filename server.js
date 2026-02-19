@@ -5,7 +5,7 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const { checkMultiplePages } = require('./linkChecker');
 const { fetchPage } = require('./pageFetcher');
-const { captureScreenshot } = require('./screenshotHandler');
+const { captureScreenshot, captureWithViewport } = require('./screenshotHandler');
 const { checkPageContent } = require('./contentChecker');
 
 // Load environment variables
@@ -246,10 +246,10 @@ app.post('/fetch-page', async (req, res) => {
   }
 });
 
-// Capture screenshot (returns base64 JSON for n8n compatibility)
+// Capture screenshot (returns raw image bytes, or JSON with dual images when includeViewport is set)
 app.post('/screenshot', async (req, res) => {
   try {
-    const { url, viewport = 'desktop', fullPage = true, quality = 70 } = req.body;
+    const { url, viewport = 'desktop', fullPage = true, quality = 70, includeViewport = false } = req.body;
 
     if (!url || typeof url !== 'string') {
       return res.status(400).json({
@@ -260,6 +260,14 @@ app.post('/screenshot', async (req, res) => {
 
     const validViewports = ['desktop', 'tablet', 'mobile'];
     const viewportType = validViewports.includes(viewport) ? viewport : 'desktop';
+
+    if (includeViewport && viewportType === 'mobile') {
+      const { fullPage: fullPageBuf, viewport: viewportBuf } = await captureWithViewport(url, quality);
+      return res.json({
+        base64: fullPageBuf.toString('base64'),
+        viewportBase64: viewportBuf.toString('base64')
+      });
+    }
 
     const buffer = await captureScreenshot(url, viewportType, fullPage, quality);
     res.json({
