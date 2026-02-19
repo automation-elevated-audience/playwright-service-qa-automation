@@ -310,6 +310,116 @@ async function runResponsivenessChecks(page) {
         issues.push('Fixed/sticky header appears to overlap page content');
       }
 
+      // 8. Color contrast (WCAG 2.1 AA)
+      function parseColor(color) {
+        if (!color || color === 'transparent' || color === 'rgba(0, 0, 0, 0)') return null;
+        const m = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (!m) return null;
+        return [parseInt(m[1]), parseInt(m[2]), parseInt(m[3])];
+      }
+      function luminance(r, g, b) {
+        const [rs, gs, bs] = [r, g, b].map(c => {
+          c = c / 255;
+          return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+      }
+      function contrastRatio(fg, bg) {
+        const l1 = luminance(...fg) + 0.05;
+        const l2 = luminance(...bg) + 0.05;
+        return l1 > l2 ? l1 / l2 : l2 / l1;
+      }
+      function getEffectiveBg(el) {
+        let current = el;
+        while (current && current !== document.documentElement) {
+          const bg = getComputedStyle(current).backgroundColor;
+          const parsed = parseColor(bg);
+          if (parsed && (parsed[0] !== 0 || parsed[1] !== 0 || parsed[2] !== 0 || bg !== 'rgba(0, 0, 0, 0)')) {
+            return parsed;
+          }
+          current = current.parentElement;
+        }
+        return [255, 255, 255];
+      }
+
+      let contrastIssues = 0;
+      const contrastSamples = [];
+      const textSelectors = 'h1, h2, h3, h4, h5, h6, p, a, button, label, span, li, td, th';
+      const textEls = document.querySelectorAll(textSelectors);
+      const checked = new Set();
+      for (const el of textEls) {
+        if (checked.size >= 200) break;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+        const text = el.textContent?.trim();
+        if (!text || text.length === 0) continue;
+
+        const key = `${el.tagName}-${Math.round(rect.top)}-${Math.round(rect.left)}`;
+        if (checked.has(key)) continue;
+        checked.add(key);
+
+        const fg = parseColor(style.color);
+        if (!fg) continue;
+        const bg = getEffectiveBg(el);
+
+        const ratio = contrastRatio(fg, bg);
+        const fontSize = parseFloat(style.fontSize) || 16;
+        const isBold = parseInt(style.fontWeight) >= 700 || style.fontWeight === 'bold';
+        const isLargeText = fontSize >= 24 || (fontSize >= 18.66 && isBold);
+        const required = isLargeText ? 3.0 : 4.5;
+        const pass = ratio >= required;
+
+        if (!pass) {
+          contrastIssues++;
+          if (contrastSamples.length < 5) {
+            contrastSamples.push({
+              element: `${el.tagName.toLowerCase()}`,
+              text: text.substring(0, 40),
+              ratio: Math.round(ratio * 100) / 100,
+              required,
+              pass: false
+            });
+          }
+        }
+      }
+      if (contrastIssues > 0) {
+        issues.push(`${contrastIssues} text element(s) have insufficient color contrast (below WCAG AA)`);
+      }
+
+      // 9. Focus indicator check
+      let focusableElements = 0;
+      let focusableWithoutIndicator = 0;
+      const focusSelectors = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+      const focusEls = Array.from(document.querySelectorAll(focusSelectors)).slice(0, 30);
+      for (const el of focusEls) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        focusableElements++;
+
+        const beforeOutline = style.outlineStyle;
+        const beforeBoxShadow = style.boxShadow;
+        const beforeBorder = style.border;
+        el.focus();
+        const afterStyle = getComputedStyle(el);
+        const hasOutline = afterStyle.outlineStyle !== 'none' && afterStyle.outlineWidth !== '0px';
+        const hasBoxShadow = afterStyle.boxShadow !== 'none' && afterStyle.boxShadow !== beforeBoxShadow;
+        const hasBorderChange = afterStyle.border !== beforeBorder;
+
+        if (!hasOutline && !hasBoxShadow && !hasBorderChange) {
+          focusableWithoutIndicator++;
+        }
+        el.blur();
+      }
+      const focusableWithIndicator = focusableElements - focusableWithoutIndicator;
+      if (focusableWithoutIndicator > 0) {
+        issues.push(`${focusableWithoutIndicator} of ${focusableElements} focusable element(s) have no visible focus indicator`);
+      }
+
       return {
         status: issues.length === 0 ? 'PASS' : 'FAIL',
         issues,
@@ -324,6 +434,11 @@ async function runResponsivenessChecks(page) {
           viewportContent,
           oversizedImages,
           fixedOverlap,
+          contrastIssues,
+          contrastSamples,
+          focusableElements,
+          focusableWithIndicator,
+          focusableWithoutIndicator,
         }
       };
     });
